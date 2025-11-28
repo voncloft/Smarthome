@@ -1,0 +1,78 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"jsonFile" : "directory-.-Debug-f5ebdc15457944623624.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.16"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "Lights",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "Lights::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-Lights-Debug-f63862ff133ce56bd7a3.json",
+					"name" : "Lights",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "Lights_autogen::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-Lights_autogen-Debug-e00c6cfbcac95bea7510.json",
+					"name" : "Lights_autogen",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "Lights_autogen_timestamp_deps::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-Lights_autogen_timestamp_deps-Debug-69780de048ecca15fdd4.json",
+					"name" : "Lights_autogen_timestamp_deps",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/von/qt6 projects/Lights/build/Desktop-Debug",
+		"source" : "/home/von/qt6 projects/Lights"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 8
+	}
+}

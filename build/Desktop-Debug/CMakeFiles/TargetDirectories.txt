@@ -1,0 +1,5 @@
+/home/von/qt6 projects/Lights/build/Desktop-Debug/CMakeFiles/Lights.dir
+/home/von/qt6 projects/Lights/build/Desktop-Debug/CMakeFiles/edit_cache.dir
+/home/von/qt6 projects/Lights/build/Desktop-Debug/CMakeFiles/rebuild_cache.dir
+/home/von/qt6 projects/Lights/build/Desktop-Debug/CMakeFiles/Lights_autogen_timestamp_deps.dir
+/home/von/qt6 projects/Lights/build/Desktop-Debug/CMakeFiles/Lights_autogen.dir
