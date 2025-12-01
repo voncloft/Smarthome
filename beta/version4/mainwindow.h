@@ -6,17 +6,11 @@
 #include <QMap>
 #include <QJsonObject>
 #include <QTabWidget>
+#include <QAction>
 #include <QTimer>
 #include <QProcess>
-#include <QListWidget>
 
-class QNetworkAccessManager;
-
-struct Routine {
-    QTime time;
-    bool turnOn = true;
-    QString name;
-};
+QT_FORWARD_DECLARE_CLASS(QNetworkAccessManager)
 
 class MainWindow : public QMainWindow
 {
@@ -26,43 +20,46 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
 
 private slots:
+    void refreshAll();
     void checkPhonePresence();
-    void checkRoutines();
-    void addRoutine();
-    void removeRoutine();
 
 private:
+    void createMenusAndToolbar();
     void loadDevices();
+    void refreshAllDeviceStates();
     void onStateFinished();
     void sendCommand(const QString &device, const QString &sku,
                      const QString &type, const QString &instance,
                      const QVariant &value);
     void buildUI();
 
-    QWidget* createLightWidget(const QJsonObject &dev);
-    QWidget* createGroupControl(const QVector<QJsonObject> &devices, const QString &title);
-    QWidget* createRoutinesTab();
+    QWidget* createGroupControl(const QVector<QJsonObject>& devices, const QString& title);
+    QWidget* createLightWidget(const QJsonObject& dev);
 
-    bool loadApiKey();
-    void promptForApiKey();
+    // Phone presence
+    void startPhoneMonitoring();
+    void turnAllLightsOff();
+    void turnAllLightsOn();
+
+    // API key
+    QString loadApiKey();
+    bool    saveApiKey(const QString &key);
+    void    promptAndSetApiKey(bool force = false);
 
     QNetworkAccessManager *nam = nullptr;
     QTabWidget            *tabWidget = nullptr;
-
-    QTimer    *presenceTimer = nullptr;
-    QTimer    *routineTimer = nullptr;
-    QProcess  *pingProcess = nullptr;
-    QString    phoneHost = "phone";  // CHANGE TO YOUR PHONE IP OR HOSTNAME
-    bool       phoneWasOnline = false;
-    bool       firstCheckDone = false;
+    QAction               *refreshAction = nullptr;
 
     QString               apiKey;
     QJsonArray            deviceList;
     QMap<QString, QJsonArray> deviceStates;
     int                   pendingStates = 0;
 
-    QList<Routine>        routines;
-    QListWidget          *routineList = nullptr;
+    // Phone presence
+    QTimer                *phoneTimer = nullptr;
+    QString               phoneHostname = "phone";  // CHANGE THIS TO YOUR PHONE'S HOSTNAME
+    bool                  phoneWasOnline = true;
+    QMap<QString, QJsonObject> lastKnownStates;
 };
 
 #endif // MAINWINDOW_H

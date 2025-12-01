@@ -8,15 +8,8 @@
 #include <QTabWidget>
 #include <QTimer>
 #include <QProcess>
-#include <QListWidget>
 
 class QNetworkAccessManager;
-
-struct Routine {
-    QTime time;
-    bool turnOn = true;
-    QString name;
-};
 
 class MainWindow : public QMainWindow
 {
@@ -27,9 +20,6 @@ public:
 
 private slots:
     void checkPhonePresence();
-    void checkRoutines();
-    void addRoutine();
-    void removeRoutine();
 
 private:
     void loadDevices();
@@ -41,7 +31,6 @@ private:
 
     QWidget* createLightWidget(const QJsonObject &dev);
     QWidget* createGroupControl(const QVector<QJsonObject> &devices, const QString &title);
-    QWidget* createRoutinesTab();
 
     bool loadApiKey();
     void promptForApiKey();
@@ -49,10 +38,10 @@ private:
     QNetworkAccessManager *nam = nullptr;
     QTabWidget            *tabWidget = nullptr;
 
+    // Phone presence detection
     QTimer    *presenceTimer = nullptr;
-    QTimer    *routineTimer = nullptr;
     QProcess  *pingProcess = nullptr;
-    QString    phoneHost = "phone";  // CHANGE TO YOUR PHONE IP OR HOSTNAME
+    QString    phoneHost = "phone";  // CHANGE THIS TO YOUR PHONE'S IP OR HOSTNAME
     bool       phoneWasOnline = false;
     bool       firstCheckDone = false;
 
@@ -60,9 +49,6 @@ private:
     QJsonArray            deviceList;
     QMap<QString, QJsonArray> deviceStates;
     int                   pendingStates = 0;
-
-    QList<Routine>        routines;
-    QListWidget          *routineList = nullptr;
 };
 
 #endif // MAINWINDOW_H
