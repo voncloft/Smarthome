@@ -64,10 +64,51 @@ static QString formatRoutineTargets(const QList<RoutineDeviceSetting> &settings)
 {
     QStringList names;
     for (const RoutineDeviceSetting &s : settings) {
-        const QString label = (s.group == "__all__" || s.group.isEmpty()) ? "All Lights" : s.group;
+        const QString label = (s.group == "__all__" || s.group.isEmpty()) ? "all lights" : s.group;
         if (!names.contains(label)) names << label;
     }
     return names.isEmpty() ? "No targets" : names.join(", ");
+}
+
+static QString formatRoutineEffects(const QList<RoutineDeviceSetting> &settings)
+{
+    bool power = false;
+    bool brightness = false;
+    bool temp = false;
+    bool color = false;
+    bool sawPowerOn = false;
+    bool sawPowerOff = false;
+    QStringList colorValues;
+
+    for (const RoutineDeviceSetting &s : settings) {
+        power = power || s.usePower;
+        brightness = brightness || s.useBrightness;
+        temp = temp || s.useTemp;
+        color = color || s.useColor;
+        if (s.usePower) {
+            if (s.power) sawPowerOn = true;
+            else sawPowerOff = true;
+        }
+        if (s.useColor) {
+            const QString hex = s.color.name(QColor::HexRgb).toUpper();
+            if (!colorValues.contains(hex)) colorValues << hex;
+        }
+    }
+
+    QStringList effects;
+    if (power) {
+        if (sawPowerOn && sawPowerOff) effects << "Power Mixed";
+        else if (sawPowerOn) effects << "Power On";
+        else effects << "Power Off";
+    }
+    if (brightness) effects << "Brightness";
+    if (temp) effects << "Temp";
+    if (color) {
+        if (colorValues.size() == 1) effects << ("Color " + colorValues.first());
+        else if (colorValues.size() > 1) effects << ("Color Mixed (" + colorValues.join("/") + ")");
+        else effects << "Color";
+    }
+    return effects.isEmpty() ? "No effects" : effects.join(", ");
 }
 
 static QString roomForDevice(const QJsonObject &dev)
@@ -689,6 +730,8 @@ bool MainWindow::openRoutineEditor(Routine &routine, const QString &title)
     QLineEdit *name = new QLineEdit(routine.name.trimmed().isEmpty() ? "Schedule" : routine.name);
     QTimeEdit *time = new QTimeEdit(routine.time.isValid() ? routine.time : QTime::currentTime());
     time->setDisplayFormat("HH:mm");
+    time->setTimeRange(QTime(0, 0), QTime(23, 59));
+    time->setWrapping(true);
 
     l->addWidget(new QLabel("Schedule Name:"));
     l->addWidget(name);
@@ -698,7 +741,8 @@ bool MainWindow::openRoutineEditor(Routine &routine, const QString &title)
     l->addWidget(new QLabel("Days:"));
     QHBoxLayout *daysLayout = new QHBoxLayout;
     QList<QCheckBox*> dayChecks;
-    for (int day = 1; day <= 7; ++day) {
+    QList<int> dayOrder = {7, 1, 2, 3, 4, 5, 6}; // Sun, Mon, Tue, Wed, Thu, Fri, Sat
+    for (int day : std::as_const(dayOrder)) {
         QCheckBox *cb = new QCheckBox(weekdayLabel(day));
         cb->setChecked(routine.days.isEmpty() || routine.days.contains(day));
         dayChecks << cb;
@@ -855,7 +899,7 @@ bool MainWindow::openRoutineEditor(Routine &routine, const QString &title)
 
     for (int i = 0; i < dayChecks.size(); ++i) {
         if (dayChecks[i]->isChecked())
-            updated.days << (i + 1);
+            updated.days << dayOrder[i];
     }
     if (updated.days.isEmpty()) {
         QMessageBox::warning(this, "Schedule", "Pick at least one day.");
@@ -900,10 +944,11 @@ void MainWindow::refreshRoutineList()
 
     routineList->clear();
     for (const Routine &r : routines) {
-        routineList->addItem(QString("%1 | %2 | %3 | %4")
+        routineList->addItem(QString("%1 | %2 | %3 | %4 | %5")
                                  .arg(r.time.toString("HH:mm"))
                                  .arg(formatDays(r.days))
                                  .arg(formatRoutineTargets(r.settings))
+                                 .arg(formatRoutineEffects(r.settings))
                                  .arg(r.name));
     }
 }
