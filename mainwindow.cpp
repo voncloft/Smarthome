@@ -31,6 +31,8 @@
 #include <QFile>
 #include <QSaveFile>
 #include <QDebug>
+#include <QMenuBar>
+#include <QAction>
 #include <QUuid>
 #include <QSignalBlocker>
 #include <algorithm>
@@ -126,6 +128,10 @@ MainWindow::MainWindow(QWidget *parent)
 {
     setWindowTitle("Govee Lights — Auto + Routines");
     resize(1450, 950);
+
+    QMenu *fileMenu = menuBar()->addMenu("File");
+    QAction *changeApiKeyAction = fileMenu->addAction("Change API Key");
+    connect(changeApiKeyAction, &QAction::triggered, this, &MainWindow::changeApiKey);
 
     // ----------------------------
     // Central widget: Tabs
@@ -223,18 +229,31 @@ bool MainWindow::loadApiKey()
 
 void MainWindow::promptForApiKey()
 {
+    changeApiKey();
+}
+
+void MainWindow::changeApiKey()
+{
     bool ok = false;
     QString key = QInputDialog::getText(
-        this, "Govee API Key",
-        "Enter your API key:",
-        QLineEdit::Password, "",
+        this,
+        "Change API Key",
+        "Enter API key:",
+        QLineEdit::Password,
+        apiKey,
         &ok
     );
 
-    if (ok && !key.isEmpty()) {
-        apiKey = key.trimmed();
+    if (ok) {
+        key = key.trimmed();
+        if (key.isEmpty()) {
+            QMessageBox::warning(this, "API Key", "API key cannot be empty.");
+            return;
+        }
+        apiKey = key;
         QDir().mkpath(QDir::homePath() + "/.config/govee");
         savePresenceSettings();
+        refreshDevices();
     }
 }
 
@@ -244,6 +263,7 @@ void MainWindow::loadPresenceSettings()
     presenceAutoOffAllGroups = false;
     presenceAutoOnGroupEnabled.clear();
     presenceAutoOffGroupEnabled.clear();
+    groupTabSettings.clear();
 
     QFile f(QDir::homePath() + "/.config/govee/Lights.json");
     bool opened = f.open(QIODevice::ReadOnly);
@@ -265,10 +285,31 @@ void MainWindow::loadPresenceSettings()
             const QJsonObject onGroups = root.value("pingAutoOnGroups").toObject();
             for (auto it = onGroups.begin(); it != onGroups.end(); ++it)
                 presenceAutoOnGroupEnabled[it.key()] = it.value().toBool(true);
+            if (onGroups.contains("__all__"))
+                presenceAutoOnAllGroups = onGroups.value("__all__").toBool(presenceAutoOnAllGroups);
+            else if (onGroups.contains("ALL"))
+                presenceAutoOnAllGroups = onGroups.value("ALL").toBool(presenceAutoOnAllGroups);
 
             const QJsonObject offGroups = root.value("pingAutoOffGroups").toObject();
             for (auto it = offGroups.begin(); it != offGroups.end(); ++it)
                 presenceAutoOffGroupEnabled[it.key()] = it.value().toBool(false);
+            if (offGroups.contains("__all__"))
+                presenceAutoOffAllGroups = offGroups.value("__all__").toBool(presenceAutoOffAllGroups);
+            else if (offGroups.contains("ALL"))
+                presenceAutoOffAllGroups = offGroups.value("ALL").toBool(presenceAutoOffAllGroups);
+
+            const QJsonObject tabSettings = root.value("tabSettings").toObject();
+            for (auto it = tabSettings.begin(); it != tabSettings.end(); ++it) {
+                const QJsonObject tab = it.value().toObject();
+                GroupTabSetting s;
+                s.brightness = qBound(1, tab.value("brightness").toInt(100), 100);
+                s.temperature = qBound(2000, tab.value("temperature").toInt(4000), 9000);
+                const QColor parsed = QColor(tab.value("color").toString("#ffffff"));
+                s.color = parsed.isValid() ? parsed : QColor(Qt::white);
+                groupTabSettings[it.key()] = s;
+            }
+            if (!groupTabSettings.contains("__all__") && groupTabSettings.contains("ALL"))
+                groupTabSettings["__all__"] = groupTabSettings.value("ALL");
         }
     }
 }
@@ -285,6 +326,38 @@ void MainWindow::savePresenceSettings() const
     for (auto it = presenceAutoOffGroupEnabled.begin(); it != presenceAutoOffGroupEnabled.end(); ++it)
         offGroups[it.key()] = it.value();
 
+    // Persist explicit values for ALL and each current tab/group so Lights.json reflects current UI state.
+    onGroups["__all__"] = presenceAutoOnAllGroups;
+    onGroups["ALL"] = presenceAutoOnAllGroups;
+    offGroups["__all__"] = presenceAutoOffAllGroups;
+    offGroups["ALL"] = presenceAutoOffAllGroups;
+
+    QStringList groups;
+    for (const QJsonValue &v : std::as_const(deviceList)) {
+        const QString group = roomForDevice(v.toObject());
+        if (!group.isEmpty() && !groups.contains(group))
+            groups << group;
+    }
+    for (const QString &group : std::as_const(groups)) {
+        onGroups[group] = isPresenceAutoOnEnabled(group);
+        offGroups[group] = isPresenceAutoOffEnabled(group);
+    }
+
+    QJsonObject tabSettings;
+    auto writeTabSettings = [&tabSettings](const QString &key, const GroupTabSetting &s) {
+        QJsonObject tab;
+        tab["brightness"] = qBound(1, s.brightness, 100);
+        tab["temperature"] = qBound(2000, s.temperature, 9000);
+        tab["color"] = s.color.name(QColor::HexRgb);
+        tabSettings[key] = tab;
+    };
+
+    const GroupTabSetting allSettings = groupTabSettings.value("__all__", GroupTabSetting{});
+    writeTabSettings("__all__", allSettings);
+    writeTabSettings("ALL", allSettings);
+    for (const QString &group : std::as_const(groups))
+        writeTabSettings(group, groupTabSettings.value(group, GroupTabSetting{}));
+
     QJsonObject root;
     root["version"] = 2;
     root["apiKey"] = apiKey.trimmed();
@@ -292,6 +365,7 @@ void MainWindow::savePresenceSettings() const
     root["pingAutoOffAllGroups"] = presenceAutoOffAllGroups;
     root["pingAutoOnGroups"] = onGroups;
     root["pingAutoOffGroups"] = offGroups;
+    root["tabSettings"] = tabSettings;
 
     QSaveFile f(configDir + "/Lights.json");
     if (!f.open(QIODevice::WriteOnly)) {
@@ -650,9 +724,14 @@ QWidget* MainWindow::createLightWidget(const QJsonObject &dev)
     cb->setEnabled(isOn);
     connect(cb, &QPushButton::clicked, [=]() mutable {
         QColor c = QColorDialog::getColor(col, this);
-        if (c.isValid())
+        if (c.isValid()) {
             sendCommand(mac, sku, "devices.capabilities.color_setting", "colorRgb",
                         (c.red()<<16)|(c.green()<<8)|c.blue());
+            if (!power->isChecked())
+                power->setChecked(true);
+            setDevicePowerState(mac, true);
+            refreshPowerButtons();
+        }
     });
     l->addWidget(cb);
 
@@ -663,6 +742,9 @@ QWidget* MainWindow::createLightWidget(const QJsonObject &dev)
         tlbl->setText(QString("Temp: %1K").arg(v));
         sendCommand(mac, sku, "devices.capabilities.color_setting", "colorTemperatureK", v);
     });
+    connect(power, &QPushButton::toggled, bs, &QWidget::setEnabled);
+    connect(power, &QPushButton::toggled, cb, &QWidget::setEnabled);
+    connect(power, &QPushButton::toggled, ts, &QWidget::setEnabled);
     l->addWidget(tlbl); l->addWidget(ts);
 
     return box;
@@ -676,6 +758,7 @@ QWidget* MainWindow::createGroupControl(const QVector<QJsonObject> &devices, con
 {
     QGroupBox *box = new QGroupBox(title);
     QVBoxLayout *l = new QVBoxLayout(box);
+    GroupTabSetting tabSetting = groupTabSettings.value(groupKey, GroupTabSetting{});
 
     QCheckBox *autoOnWhenPingable = new QCheckBox("Turn ON when 192.168.42.2 is pingable");
     autoOnWhenPingable->setChecked(isPresenceAutoOnEnabled(groupKey));
@@ -738,36 +821,55 @@ QWidget* MainWindow::createGroupControl(const QVector<QJsonObject> &devices, con
 
     QSlider *bri = new QSlider(Qt::Horizontal);
     bri->setRange(1,100);
-    bri->setValue(100);
-    QLabel *briLbl = new QLabel("Group Brightness: 100%");
+    bri->setValue(tabSetting.brightness);
+    QLabel *briLbl = new QLabel(QString("Group Brightness: %1%").arg(tabSetting.brightness));
     connect(bri, &QSlider::valueChanged, [=](int v){
         briLbl->setText(QString("Group Brightness: %1%").arg(v));
         for (const auto &d : devices)
             sendCommand(d["device"].toString(), d["sku"].toString(),
                         "devices.capabilities.range", "brightness", v);
+        groupTabSettings[groupKey].brightness = v;
+        savePresenceSettings();
     });
     l->addWidget(briLbl); l->addWidget(bri);
 
     QSlider *temp = new QSlider(Qt::Horizontal);
     temp->setRange(2000,9000);
-    temp->setValue(4000);
-    QLabel *tempLbl = new QLabel("Group Temp: 4000K");
+    temp->setValue(tabSetting.temperature);
+    QLabel *tempLbl = new QLabel(QString("Group Temp: %1K").arg(tabSetting.temperature));
     connect(temp, &QSlider::valueChanged, [=](int v){
         tempLbl->setText(QString("Group Temp: %1K").arg(v));
         for (const auto &d : devices)
             sendCommand(d["device"].toString(), d["sku"].toString(),
                         "devices.capabilities.color_setting", "colorTemperatureK", v);
+        groupTabSettings[groupKey].temperature = v;
+        savePresenceSettings();
     });
     l->addWidget(tempLbl); l->addWidget(temp);
 
     QPushButton *color = new QPushButton("Pick Group Color");
+    auto setGroupColorButton = [](QPushButton *btn, const QColor &c) {
+        btn->setProperty("selectedColor", c);
+        btn->setText("Group Color " + c.name(QColor::HexRgb).toUpper());
+        btn->setStyleSheet(QString("background:%1; color:%2;")
+                               .arg(c.name(QColor::HexRgb))
+                               .arg(c.lightness() < 128 ? "#ffffff" : "#000000"));
+    };
+    setGroupColorButton(color, tabSetting.color.isValid() ? tabSetting.color : QColor(Qt::white));
     connect(color, &QPushButton::clicked, [=]{
-        QColor c = QColorDialog::getColor(Qt::white, this);
+        const QColor current = color->property("selectedColor").value<QColor>();
+        QColor c = QColorDialog::getColor(current, this);
         if (c.isValid()) {
+            setGroupColorButton(color, c);
             int rgb = (c.red()<<16)|(c.green()<<8)|c.blue();
-            for (const auto &d : devices)
+            for (const auto &d : devices) {
                 sendCommand(d["device"].toString(), d["sku"].toString(),
                             "devices.capabilities.color_setting", "colorRgb", rgb);
+                setDevicePowerState(d["device"].toString(), true);
+            }
+            groupTabSettings[groupKey].color = c;
+            savePresenceSettings();
+            refreshPowerButtons();
         }
     });
     l->addWidget(color);

@@ -38,6 +38,12 @@ struct Routine {
     QList<RoutineDeviceSetting> settings;
 };
 
+struct GroupTabSetting {
+    int brightness = 100;
+    int temperature = 4000;
+    QColor color = Qt::white;
+};
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -51,6 +57,7 @@ private slots:
     void addRoutine();
     void editRoutine();
     void removeRoutine();
+    void changeApiKey();
 
     // NEW:
     void refreshDevices();
@@ -109,6 +116,7 @@ private:
     bool presenceAutoOffAllGroups = false;
     QMap<QString, bool> presenceAutoOnGroupEnabled;
     QMap<QString, bool> presenceAutoOffGroupEnabled;
+    QMap<QString, GroupTabSetting> groupTabSettings;
 };
 
 #endif
