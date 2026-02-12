@@ -33,6 +33,7 @@
 #include <QDebug>
 #include <QUuid>
 #include <QSignalBlocker>
+#include <algorithm>
 
 static bool parsePowerState(const QJsonValue &value)
 {
@@ -941,6 +942,11 @@ bool MainWindow::openRoutineEditor(Routine &routine, const QString &title)
 void MainWindow::refreshRoutineList()
 {
     if (!routineList) return;
+
+    std::sort(routines.begin(), routines.end(), [](const Routine &a, const Routine &b) {
+        if (a.time != b.time) return a.time < b.time;
+        return a.name.toLower() < b.name.toLower();
+    });
 
     routineList->clear();
     for (const Routine &r : routines) {
