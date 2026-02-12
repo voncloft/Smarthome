@@ -187,6 +187,8 @@ MainWindow::MainWindow(QWidget *parent)
         return;
     }
 
+    loadPresenceSettings();
+    savePresenceSettings();
     loadRoutines();
     loadDevices();
 }
@@ -197,12 +199,25 @@ MainWindow::MainWindow(QWidget *parent)
 
 bool MainWindow::loadApiKey()
 {
-    QFile f(QDir::homePath() + "/.config/govee/api-key");
+    QFile f(QDir::homePath() + "/.config/govee/Lights.json");
     if (f.open(QIODevice::ReadOnly)) {
-        apiKey = QString::fromUtf8(f.readAll()).trimmed();
+        const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
         f.close();
-        return true;
+        if (doc.isObject()) {
+            apiKey = doc.object().value("apiKey").toString().trimmed();
+            if (!apiKey.isEmpty())
+                return true;
+        }
     }
+
+    QFile legacy(QDir::homePath() + "/.config/govee/api-key");
+    if (legacy.open(QIODevice::ReadOnly)) {
+        apiKey = QString::fromUtf8(legacy.readAll()).trimmed();
+        legacy.close();
+        if (!apiKey.isEmpty())
+            return true;
+    }
+
     return false;
 }
 
@@ -219,9 +234,92 @@ void MainWindow::promptForApiKey()
     if (ok && !key.isEmpty()) {
         apiKey = key.trimmed();
         QDir().mkpath(QDir::homePath() + "/.config/govee");
-        QFile f(QDir::homePath() + "/.config/govee/api-key");
-        if (f.open(QIODevice::WriteOnly)) f.write(apiKey.toUtf8());
+        savePresenceSettings();
     }
+}
+
+void MainWindow::loadPresenceSettings()
+{
+    presenceAutoOnAllGroups = true;
+    presenceAutoOffAllGroups = false;
+    presenceAutoOnGroupEnabled.clear();
+    presenceAutoOffGroupEnabled.clear();
+
+    QFile f(QDir::homePath() + "/.config/govee/Lights.json");
+    bool opened = f.open(QIODevice::ReadOnly);
+    if (!opened) {
+        f.setFileName(QDir::homePath() + "/.config/govee/app-settings.json");
+        opened = f.open(QIODevice::ReadOnly);
+    }
+    if (opened) {
+        const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+        f.close();
+        if (doc.isObject()) {
+            const QJsonObject root = doc.object();
+            if (apiKey.trimmed().isEmpty())
+                apiKey = root.value("apiKey").toString().trimmed();
+
+            presenceAutoOnAllGroups = root.value("pingAutoOnAllGroups").toBool(true);
+            presenceAutoOffAllGroups = root.value("pingAutoOffAllGroups").toBool(false);
+
+            const QJsonObject onGroups = root.value("pingAutoOnGroups").toObject();
+            for (auto it = onGroups.begin(); it != onGroups.end(); ++it)
+                presenceAutoOnGroupEnabled[it.key()] = it.value().toBool(true);
+
+            const QJsonObject offGroups = root.value("pingAutoOffGroups").toObject();
+            for (auto it = offGroups.begin(); it != offGroups.end(); ++it)
+                presenceAutoOffGroupEnabled[it.key()] = it.value().toBool(false);
+        }
+    }
+}
+
+void MainWindow::savePresenceSettings() const
+{
+    const QString configDir = QDir::homePath() + "/.config/govee";
+    QDir().mkpath(configDir);
+
+    QJsonObject onGroups;
+    for (auto it = presenceAutoOnGroupEnabled.begin(); it != presenceAutoOnGroupEnabled.end(); ++it)
+        onGroups[it.key()] = it.value();
+    QJsonObject offGroups;
+    for (auto it = presenceAutoOffGroupEnabled.begin(); it != presenceAutoOffGroupEnabled.end(); ++it)
+        offGroups[it.key()] = it.value();
+
+    QJsonObject root;
+    root["version"] = 2;
+    root["apiKey"] = apiKey.trimmed();
+    root["pingAutoOnAllGroups"] = presenceAutoOnAllGroups;
+    root["pingAutoOffAllGroups"] = presenceAutoOffAllGroups;
+    root["pingAutoOnGroups"] = onGroups;
+    root["pingAutoOffGroups"] = offGroups;
+
+    QSaveFile f(configDir + "/Lights.json");
+    if (!f.open(QIODevice::WriteOnly)) {
+        qWarning() << "Failed to open Lights settings file for writing";
+        return;
+    }
+
+    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    if (!f.commit())
+        qWarning() << "Failed to commit Lights settings file";
+}
+
+bool MainWindow::isPresenceAutoOnEnabled(const QString &groupKey) const
+{
+    if (groupKey == "__all__")
+        return presenceAutoOnAllGroups;
+    if (presenceAutoOnGroupEnabled.contains(groupKey))
+        return presenceAutoOnGroupEnabled.value(groupKey);
+    return presenceAutoOnAllGroups;
+}
+
+bool MainWindow::isPresenceAutoOffEnabled(const QString &groupKey) const
+{
+    if (groupKey == "__all__")
+        return presenceAutoOffAllGroups;
+    if (presenceAutoOffGroupEnabled.contains(groupKey))
+        return presenceAutoOffGroupEnabled.value(groupKey);
+    return presenceAutoOffAllGroups;
 }
 
 void MainWindow::loadRoutines()
@@ -244,6 +342,9 @@ void MainWindow::loadRoutines()
         Routine r;
         r.name = ro.value("name").toString("Schedule");
         r.time = QTime::fromString(ro.value("time").toString(), "HH:mm");
+        r.phoneCondition = qBound(0, ro.value("phoneCondition").toInt(0), 2);
+        if (r.phoneCondition == 0 && ro.value("requirePhoneOnline").toBool(false))
+            r.phoneCondition = 1;
         if (!r.time.isValid())
             continue;
 
@@ -295,6 +396,7 @@ void MainWindow::saveRoutines() const
         QJsonObject ro;
         ro["name"] = r.name;
         ro["time"] = r.time.toString("HH:mm");
+        ro["phoneCondition"] = qBound(0, r.phoneCondition, 2);
 
         QJsonArray days;
         for (int day : r.days) days.append(day);
@@ -570,10 +672,32 @@ QWidget* MainWindow::createLightWidget(const QJsonObject &dev)
 // GROUP CONTROL WIDGET
 // ==========================================================================
 
-QWidget* MainWindow::createGroupControl(const QVector<QJsonObject> &devices, const QString &title)
+QWidget* MainWindow::createGroupControl(const QVector<QJsonObject> &devices, const QString &title, const QString &groupKey)
 {
     QGroupBox *box = new QGroupBox(title);
     QVBoxLayout *l = new QVBoxLayout(box);
+
+    QCheckBox *autoOnWhenPingable = new QCheckBox("Turn ON when 192.168.42.2 is pingable");
+    autoOnWhenPingable->setChecked(isPresenceAutoOnEnabled(groupKey));
+    connect(autoOnWhenPingable, &QCheckBox::toggled, this, [this, groupKey](bool enabled) {
+        if (groupKey == "__all__")
+            presenceAutoOnAllGroups = enabled;
+        else
+            presenceAutoOnGroupEnabled[groupKey] = enabled;
+        savePresenceSettings();
+    });
+    l->addWidget(autoOnWhenPingable);
+
+    QCheckBox *autoOffWhenNotPingable = new QCheckBox("Turn OFF when 192.168.42.2 is NOT pingable");
+    autoOffWhenNotPingable->setChecked(isPresenceAutoOffEnabled(groupKey));
+    connect(autoOffWhenNotPingable, &QCheckBox::toggled, this, [this, groupKey](bool enabled) {
+        if (groupKey == "__all__")
+            presenceAutoOffAllGroups = enabled;
+        else
+            presenceAutoOffGroupEnabled[groupKey] = enabled;
+        savePresenceSettings();
+    });
+    l->addWidget(autoOffWhenNotPingable);
 
     bool groupIsOn = false;
     for (const QJsonObject &d : devices) {
@@ -738,6 +862,15 @@ bool MainWindow::openRoutineEditor(Routine &routine, const QString &title)
     l->addWidget(name);
     l->addWidget(new QLabel("Time:"));
     l->addWidget(time);
+    l->addWidget(new QLabel("Ping Condition:"));
+    QComboBox *pingCondition = new QComboBox;
+    pingCondition->addItem("Run regardless of ping", 0);
+    pingCondition->addItem("Only run when 192.168.42.2 is pingable", 1);
+    pingCondition->addItem("Only run when 192.168.42.2 is NOT pingable", 2);
+    int pingIndex = pingCondition->findData(qBound(0, routine.phoneCondition, 2));
+    if (pingIndex < 0) pingIndex = 0;
+    pingCondition->setCurrentIndex(pingIndex);
+    l->addWidget(pingCondition);
 
     l->addWidget(new QLabel("Days:"));
     QHBoxLayout *daysLayout = new QHBoxLayout;
@@ -897,6 +1030,7 @@ bool MainWindow::openRoutineEditor(Routine &routine, const QString &title)
     Routine updated;
     updated.time = time->time();
     updated.name = name->text().trimmed().isEmpty() ? "Schedule" : name->text().trimmed();
+    updated.phoneCondition = pingCondition->currentData().toInt();
 
     for (int i = 0; i < dayChecks.size(); ++i) {
         if (dayChecks[i]->isChecked())
@@ -950,11 +1084,15 @@ void MainWindow::refreshRoutineList()
 
     routineList->clear();
     for (const Routine &r : routines) {
-        routineList->addItem(QString("%1 | %2 | %3 | %4 | %5")
+        const QString pingLabel = (r.phoneCondition == 1) ? "Pingable"
+                                  : (r.phoneCondition == 2) ? "Not Pingable"
+                                                            : "Any Ping State";
+        routineList->addItem(QString("%1 | %2 | %3 | %4 | %5 | %6")
                                  .arg(r.time.toString("HH:mm"))
                                  .arg(formatDays(r.days))
                                  .arg(formatRoutineTargets(r.settings))
                                  .arg(formatRoutineEffects(r.settings))
+                                 .arg(pingLabel)
                                  .arg(r.name));
     }
 }
@@ -971,6 +1109,8 @@ void MainWindow::checkRoutines()
     bool routineExecuted = false;
     for (const Routine &r : routines) {
         if (!r.days.contains(day)) continue;
+        if (r.phoneCondition == 1 && !phoneWasOnline) continue;
+        if (r.phoneCondition == 2 && phoneWasOnline) continue;
         if (r.time.hour()==now.hour() && r.time.minute()==now.minute()) {
             routineExecuted = true;
             qDebug() << "Executing routine:" << r.name;
@@ -1034,14 +1174,23 @@ void MainWindow::checkPhonePresence()
 
                 phoneWasOnline = nowOnline;
                 qDebug() << (nowOnline ? "Phone HOME" : "Phone AWAY");
+
+                bool changed = false;
                 for (const QJsonValue &v : std::as_const(deviceList)) {
                     const QJsonObject dev = v.toObject();
+                    const QString room = roomForDevice(dev);
+                    const bool shouldApply = nowOnline
+                                             ? isPresenceAutoOnEnabled(room)
+                                             : isPresenceAutoOffEnabled(room);
+                    if (!shouldApply) continue;
+
                     sendCommand(dev["device"].toString(), dev["sku"].toString(),
                                 "devices.capabilities.on_off", "powerSwitch",
                                 nowOnline ? 1 : 0);
                     setDevicePowerState(dev["device"].toString(), nowOnline);
+                    changed = true;
                 }
-                refreshPowerButtons();
+                if (changed) refreshPowerButtons();
             },
             Qt::SingleShotConnection);
 
@@ -1074,7 +1223,7 @@ void MainWindow::buildUI()
         lay->setContentsMargins(20, 20, 20, 20);
         lay->setSpacing(20);
 
-        lay->addWidget(createGroupControl(allLights, "ALL LIGHTS"));
+        lay->addWidget(createGroupControl(allLights, "ALL LIGHTS", "__all__"));
         for (const QJsonObject &d : std::as_const(allLights))
             lay->addWidget(createLightWidget(d));
 
@@ -1094,7 +1243,7 @@ void MainWindow::buildUI()
         lay->setContentsMargins(20, 20, 20, 20);
         lay->setSpacing(20);
 
-        lay->addWidget(createGroupControl(groups[room], room + " - Group"));
+        lay->addWidget(createGroupControl(groups[room], room + " - Group", room));
         for (const QJsonObject &d : std::as_const(groups[room]))
             lay->addWidget(createLightWidget(d));
 

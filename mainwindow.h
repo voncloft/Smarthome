@@ -34,6 +34,7 @@ struct Routine {
     QTime time;
     QString name;
     QList<int> days; // Qt dayOfWeek: 1=Mon ... 7=Sun
+    int phoneCondition = 0; // 0=Any, 1=Pingable, 2=Not Pingable
     QList<RoutineDeviceSetting> settings;
 };
 
@@ -67,11 +68,15 @@ private:
     void refreshPowerButtons();
 
     QWidget* createLightWidget(const QJsonObject &dev);
-    QWidget* createGroupControl(const QVector<QJsonObject> &devices, const QString &title);
+    QWidget* createGroupControl(const QVector<QJsonObject> &devices, const QString &title, const QString &groupKey);
     QWidget* createRoutinesTab();
 
     bool loadApiKey();
     void promptForApiKey();
+    void loadPresenceSettings();
+    void savePresenceSettings() const;
+    bool isPresenceAutoOnEnabled(const QString &groupKey) const;
+    bool isPresenceAutoOffEnabled(const QString &groupKey) const;
     void loadRoutines();
     void saveRoutines() const;
     void refreshRoutineList();
@@ -100,6 +105,10 @@ private:
 
     QList<Routine> routines;
     QListWidget *routineList = nullptr;
+    bool presenceAutoOnAllGroups = true;
+    bool presenceAutoOffAllGroups = false;
+    QMap<QString, bool> presenceAutoOnGroupEnabled;
+    QMap<QString, bool> presenceAutoOffGroupEnabled;
 };
 
 #endif
