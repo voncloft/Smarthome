@@ -9,13 +9,32 @@
 #include <QTimer>
 #include <QProcess>
 #include <QListWidget>
+#include <QColor>
 
 class QNetworkAccessManager;
+class QPushButton;
+
+struct RoutineDeviceSetting {
+    QString group; // "__all__" or room key from device name prefix
+
+    bool usePower = false;
+    int power = 1;
+
+    bool useBrightness = false;
+    int brightness = 100;
+
+    bool useTemp = false;
+    int temperature = 4000;
+
+    bool useColor = false;
+    QColor color = Qt::white;
+};
 
 struct Routine {
     QTime time;
-    bool turnOn = true;
     QString name;
+    QList<int> days; // Qt dayOfWeek: 1=Mon ... 7=Sun
+    QList<RoutineDeviceSetting> settings;
 };
 
 class MainWindow : public QMainWindow
@@ -29,7 +48,11 @@ private slots:
     void checkPhonePresence();
     void checkRoutines();
     void addRoutine();
+    void editRoutine();
     void removeRoutine();
+
+    // NEW:
+    void refreshDevices();
 
 private:
     void loadDevices();
@@ -37,7 +60,11 @@ private:
     void sendCommand(const QString &device, const QString &sku,
                      const QString &type, const QString &instance,
                      const QVariant &value);
+
     void buildUI();
+    bool isDeviceOn(const QString &mac) const;
+    void setDevicePowerState(const QString &mac, bool on);
+    void refreshPowerButtons();
 
     QWidget* createLightWidget(const QJsonObject &dev);
     QWidget* createGroupControl(const QVector<QJsonObject> &devices, const QString &title);
@@ -45,24 +72,34 @@ private:
 
     bool loadApiKey();
     void promptForApiKey();
+    void loadRoutines();
+    void saveRoutines() const;
+    void refreshRoutineList();
+    bool openRoutineEditor(Routine &routine, const QString &title);
 
+private:
     QNetworkAccessManager *nam = nullptr;
-    QTabWidget            *tabWidget = nullptr;
+    QTabWidget *tabWidget = nullptr;
 
-    QTimer    *presenceTimer = nullptr;
-    QTimer    *routineTimer = nullptr;
-    QProcess  *pingProcess = nullptr;
-    QString    phoneHost = "phone";  // CHANGE TO YOUR PHONE IP OR HOSTNAME
-    bool       phoneWasOnline = false;
-    bool       firstCheckDone = false;
+    // NEW refresh button
+    QPushButton *refreshBtn = nullptr;
 
-    QString               apiKey;
-    QJsonArray            deviceList;
+    QTimer *presenceTimer = nullptr;
+    QTimer *routineTimer = nullptr;
+
+    QProcess *pingProcess = nullptr;
+    QString phoneHost = "192.168.42.2";
+    bool phoneWasOnline = false;
+    bool firstCheckDone = false;
+
+    QString apiKey;
+
+    QJsonArray deviceList;
     QMap<QString, QJsonArray> deviceStates;
-    int                   pendingStates = 0;
+    int pendingStates = 0;
 
-    QList<Routine>        routines;
-    QListWidget          *routineList = nullptr;
+    QList<Routine> routines;
+    QListWidget *routineList = nullptr;
 };
 
-#endif // MAINWINDOW_H
+#endif
