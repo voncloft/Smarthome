@@ -196,6 +196,7 @@ MainWindow::MainWindow(QWidget *parent)
     loadPresenceSettings();
     savePresenceSettings();
     loadRoutines();
+    buildUI(); // Show baseline tabs immediately, then populate device data asynchronously.
     loadDevices();
 }
 
@@ -518,7 +519,6 @@ void MainWindow::refreshDevices()
     deviceStates.clear();
     pendingStates = 0;
 
-    tabWidget->clear();
     loadDevices();
 }
 
@@ -538,18 +538,48 @@ void MainWindow::loadDevices()
 
         if (reply->error() != QNetworkReply::NoError) {
             qWarning() << "Device list error:" << reply->errorString();
+            // Keep UI usable even if fetch fails; show existing/empty tabs instead of a blank tab bar.
+            pendingStates = 0;
+            buildUI();
             return;
         }
 
         QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
-        if (doc.object()["code"].toInt() != 200) return;
+        const QJsonObject root = doc.object();
+        const int code = root.contains("code") ? root.value("code").toInt(-1) : 200;
+        if (code != 200) {
+            qWarning() << "Device list API error code:" << code
+                       << "message:" << root.value("message").toString();
+            pendingStates = 0;
+            buildUI();
+            return;
+        }
 
-        deviceList = doc.object()["data"].toArray();
+        auto extractDevices = [](const QJsonValue &value) -> QJsonArray {
+            if (value.isArray())
+                return value.toArray();
+            if (!value.isObject())
+                return {};
+
+            const QJsonObject obj = value.toObject();
+            if (obj.value("devices").isArray()) return obj.value("devices").toArray();
+            if (obj.value("data").isArray()) return obj.value("data").toArray();
+            if (obj.value("list").isArray()) return obj.value("list").toArray();
+            if (obj.value("items").isArray()) return obj.value("items").toArray();
+            return {};
+        };
+
+        deviceList = extractDevices(root.value("data"));
+        if (deviceList.isEmpty())
+            deviceList = extractDevices(root.value("payload"));
+        if (deviceList.isEmpty())
+            deviceList = extractDevices(root.value("devices"));
 
         pendingStates = deviceList.size();
         deviceStates.clear();
 
         if (pendingStates == 0) {
+            qWarning() << "Device list parsed but empty.";
             buildUI();
             return;
         }
@@ -1267,12 +1297,11 @@ void MainWindow::checkPhonePresence()
                 const bool nowOnline = (exitCode == 0);
 
                 if (!firstCheckDone) {
-                    phoneWasOnline = nowOnline;
+                    // Apply presence rules on initial check too, so startup state is enforced.
                     firstCheckDone = true;
+                } else if (nowOnline == phoneWasOnline) {
                     return;
                 }
-
-                if (nowOnline == phoneWasOnline) return;
 
                 phoneWasOnline = nowOnline;
                 qDebug() << (nowOnline ? "Phone HOME" : "Phone AWAY");
@@ -1280,16 +1309,21 @@ void MainWindow::checkPhonePresence()
                 bool changed = false;
                 for (const QJsonValue &v : std::as_const(deviceList)) {
                     const QJsonObject dev = v.toObject();
+                    const QString mac = dev["device"].toString();
                     const QString room = roomForDevice(dev);
+                    // Online behavior is controlled by per-room tabs only.
+                    // Offline behavior supports a global ALL LIGHTS override.
                     const bool shouldApply = nowOnline
-                                             ? isPresenceAutoOnEnabled(room)
-                                             : isPresenceAutoOffEnabled(room);
+                                             ? presenceAutoOnGroupEnabled.value(room, false)
+                                             : (presenceAutoOffAllGroups
+                                                || presenceAutoOffGroupEnabled.value(room, false));
                     if (!shouldApply) continue;
+                    if (isDeviceOn(mac) == nowOnline) continue;
 
-                    sendCommand(dev["device"].toString(), dev["sku"].toString(),
+                    sendCommand(mac, dev["sku"].toString(),
                                 "devices.capabilities.on_off", "powerSwitch",
                                 nowOnline ? 1 : 0);
-                    setDevicePowerState(dev["device"].toString(), nowOnline);
+                    setDevicePowerState(mac, nowOnline);
                     changed = true;
                 }
                 if (changed) refreshPowerButtons();
