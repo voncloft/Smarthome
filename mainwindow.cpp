@@ -29,6 +29,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QSaveFile>
 #include <QDebug>
 #include <QMenuBar>
@@ -119,6 +120,44 @@ static QString roomForDevice(const QJsonObject &dev)
     return dev["deviceName"].toString().split(' ', Qt::SkipEmptyParts).value(0, "Other");
 }
 
+static QStringList configDirCandidates()
+{
+    const QString base = QDir::homePath() + "/.config";
+    return {base + "/govee", base + "/Govee"};
+}
+
+static QString findConfigFileForRead(const QString &fileName)
+{
+    const QStringList dirs = configDirCandidates();
+    for (const QString &dir : dirs) {
+        const QString path = dir + "/" + fileName;
+        if (QFileInfo::exists(path))
+            return path;
+    }
+    return QString();
+}
+
+static QString resolveConfigDirForWrite()
+{
+    const QStringList dirs = configDirCandidates();
+    const QStringList markerFiles = {"Lights.json", "app-settings.json", "routines.json", "api-key"};
+
+    for (const QString &marker : markerFiles) {
+        for (const QString &dir : dirs) {
+            if (QFileInfo::exists(dir + "/" + marker))
+                return dir;
+        }
+    }
+
+    for (const QString &dir : dirs) {
+        if (QFileInfo(dir).exists())
+            return dir;
+    }
+
+    // Default for fresh installs.
+    return dirs.first();
+}
+
 // ==========================================================================
 // MAIN WINDOW Constructor
 // ==========================================================================
@@ -194,7 +233,6 @@ MainWindow::MainWindow(QWidget *parent)
     }
 
     loadPresenceSettings();
-    savePresenceSettings();
     loadRoutines();
     buildUI(); // Show baseline tabs immediately, then populate device data asynchronously.
     loadDevices();
@@ -206,7 +244,8 @@ MainWindow::MainWindow(QWidget *parent)
 
 bool MainWindow::loadApiKey()
 {
-    QFile f(QDir::homePath() + "/.config/govee/Lights.json");
+    const QString settingsPath = findConfigFileForRead("Lights.json");
+    QFile f(settingsPath);
     if (f.open(QIODevice::ReadOnly)) {
         const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
         f.close();
@@ -217,7 +256,8 @@ bool MainWindow::loadApiKey()
         }
     }
 
-    QFile legacy(QDir::homePath() + "/.config/govee/api-key");
+    const QString legacyPath = findConfigFileForRead("api-key");
+    QFile legacy(legacyPath);
     if (legacy.open(QIODevice::ReadOnly)) {
         apiKey = QString::fromUtf8(legacy.readAll()).trimmed();
         legacy.close();
@@ -266,10 +306,10 @@ void MainWindow::loadPresenceSettings()
     presenceAutoOffGroupEnabled.clear();
     groupTabSettings.clear();
 
-    QFile f(QDir::homePath() + "/.config/govee/Lights.json");
+    QFile f(findConfigFileForRead("Lights.json"));
     bool opened = f.open(QIODevice::ReadOnly);
     if (!opened) {
-        f.setFileName(QDir::homePath() + "/.config/govee/app-settings.json");
+        f.setFileName(findConfigFileForRead("app-settings.json"));
         opened = f.open(QIODevice::ReadOnly);
     }
     if (opened) {
@@ -317,7 +357,7 @@ void MainWindow::loadPresenceSettings()
 
 void MainWindow::savePresenceSettings() const
 {
-    const QString configDir = QDir::homePath() + "/.config/govee";
+    const QString configDir = resolveConfigDirForWrite();
     QDir().mkpath(configDir);
 
     QJsonObject onGroups;
@@ -401,7 +441,7 @@ void MainWindow::loadRoutines()
 {
     routines.clear();
 
-    QFile f(QDir::homePath() + "/.config/govee/routines.json");
+    QFile f(findConfigFileForRead("routines.json"));
     if (!f.open(QIODevice::ReadOnly))
         return;
 
@@ -463,7 +503,7 @@ void MainWindow::loadRoutines()
 
 void MainWindow::saveRoutines() const
 {
-    const QString configDir = QDir::homePath() + "/.config/govee";
+    const QString configDir = resolveConfigDirForWrite();
     QDir().mkpath(configDir);
 
     QJsonArray routineArray;
@@ -1351,6 +1391,14 @@ void MainWindow::buildUI()
         groups[room] << dev;
     }
 
+    auto sortedDevicesByName = [](QVector<QJsonObject> devices) {
+        std::sort(devices.begin(), devices.end(), [](const QJsonObject &a, const QJsonObject &b) {
+            return a.value("deviceName").toString().compare(
+                       b.value("deviceName").toString(), Qt::CaseInsensitive) < 0;
+        });
+        return devices;
+    };
+
     {
         auto *sa = new QScrollArea;
         sa->setWidgetResizable(true);
@@ -1360,8 +1408,18 @@ void MainWindow::buildUI()
         lay->setSpacing(20);
 
         lay->addWidget(createGroupControl(allLights, "ALL LIGHTS", "__all__"));
-        for (const QJsonObject &d : std::as_const(allLights))
-            lay->addWidget(createLightWidget(d));
+        QStringList groupedRooms = groups.keys();
+        groupedRooms.sort(Qt::CaseInsensitive);
+        for (const QString &room : std::as_const(groupedRooms)) {
+            auto *roomBox = new QGroupBox(room + " (" + QString::number(groups[room].size()) + ")");
+            auto *roomLayout = new QVBoxLayout(roomBox);
+            roomLayout->setContentsMargins(12, 12, 12, 12);
+            roomLayout->setSpacing(12);
+            const QVector<QJsonObject> roomDevices = sortedDevicesByName(groups.value(room));
+            for (const QJsonObject &d : roomDevices)
+                roomLayout->addWidget(createLightWidget(d));
+            lay->addWidget(roomBox);
+        }
 
         lay->addStretch();
         sa->setWidget(content);
@@ -1379,8 +1437,9 @@ void MainWindow::buildUI()
         lay->setContentsMargins(20, 20, 20, 20);
         lay->setSpacing(20);
 
-        lay->addWidget(createGroupControl(groups[room], room + " - Group", room));
-        for (const QJsonObject &d : std::as_const(groups[room]))
+        const QVector<QJsonObject> roomDevices = sortedDevicesByName(groups.value(room));
+        lay->addWidget(createGroupControl(roomDevices, room + " - Group", room));
+        for (const QJsonObject &d : roomDevices)
             lay->addWidget(createLightWidget(d));
 
         lay->addStretch();
