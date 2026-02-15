@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bulb" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffe88a"/>
+      <stop offset="100%" stop-color="#ffcc33"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="44" fill="#1f232a"/>
+  <circle cx="128" cy="104" r="62" fill="url(#bulb)" stroke="#f2b705" stroke-width="8"/>
+
+  <rect x="92" y="152" width="72" height="24" rx="10" fill="#d9dce3"/>
+  <rect x="96" y="176" width="64" height="16" rx="8" fill="#b8bec8"/>
+  <rect x="100" y="194" width="56" height="12" rx="6" fill="#8f97a5"/>
+
+  <path d="M98 108c9-8 19-12 30-12 12 0 23 4 32 13" fill="none" stroke="#f7f1c8" stroke-width="8" stroke-linecap="round"/>
+</svg>

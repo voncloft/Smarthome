@@ -14,6 +14,7 @@ set(PROJECT_SOURCES
     main.cpp
     mainwindow.cpp
     mainwindow.h
+    resources.qrc
     # mainwindow.ui   # ← remove this line if you don’t have a .ui file yet
 )
 

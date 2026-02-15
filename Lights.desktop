@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Lights
+Comment=Launch Lights
+Exec=sh -c 'cd "$(dirname "$1")" && ./build/Lights' dummy %k
+Icon=lights
+Terminal=false
+Categories=Utility;
+StartupNotify=true
