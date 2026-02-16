@@ -33,6 +33,7 @@ struct RoutineDeviceSetting {
 struct Routine {
     QTime time;
     QString name;
+    bool enabled = true;
     QList<int> days; // Qt dayOfWeek: 1=Mon ... 7=Sun
     int phoneCondition = 0; // 0=Any, 1=Pingable, 2=Not Pingable
     QList<RoutineDeviceSetting> settings;
@@ -77,6 +78,7 @@ private:
     QWidget* createLightWidget(const QJsonObject &dev);
     QWidget* createGroupControl(const QVector<QJsonObject> &devices, const QString &title, const QString &groupKey);
     QWidget* createRoutinesTab();
+    QWidget* createConfigTab();
 
     bool loadApiKey();
     void promptForApiKey();

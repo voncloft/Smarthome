@@ -319,6 +319,9 @@ void MainWindow::loadPresenceSettings()
             const QJsonObject root = doc.object();
             if (apiKey.trimmed().isEmpty())
                 apiKey = root.value("apiKey").toString().trimmed();
+            phoneHost = root.value("phoneHost").toString(phoneHost).trimmed();
+            if (phoneHost.isEmpty())
+                phoneHost = "192.168.42.2";
 
             presenceAutoOnAllGroups = root.value("pingAutoOnAllGroups").toBool(true);
             presenceAutoOffAllGroups = root.value("pingAutoOffAllGroups").toBool(false);
@@ -402,6 +405,7 @@ void MainWindow::savePresenceSettings() const
     QJsonObject root;
     root["version"] = 2;
     root["apiKey"] = apiKey.trimmed();
+    root["phoneHost"] = phoneHost.trimmed();
     root["pingAutoOnAllGroups"] = presenceAutoOnAllGroups;
     root["pingAutoOffAllGroups"] = presenceAutoOffAllGroups;
     root["pingAutoOnGroups"] = onGroups;
@@ -457,6 +461,7 @@ void MainWindow::loadRoutines()
         Routine r;
         r.name = ro.value("name").toString("Schedule");
         r.time = QTime::fromString(ro.value("time").toString(), "HH:mm");
+        r.enabled = ro.value("enabled").toBool(true);
         r.phoneCondition = qBound(0, ro.value("phoneCondition").toInt(0), 2);
         if (r.phoneCondition == 0 && ro.value("requirePhoneOnline").toBool(false))
             r.phoneCondition = 1;
@@ -511,6 +516,7 @@ void MainWindow::saveRoutines() const
         QJsonObject ro;
         ro["name"] = r.name;
         ro["time"] = r.time.toString("HH:mm");
+        ro["enabled"] = r.enabled;
         ro["phoneCondition"] = qBound(0, r.phoneCondition, 2);
 
         QJsonArray days;
@@ -830,7 +836,7 @@ QWidget* MainWindow::createGroupControl(const QVector<QJsonObject> &devices, con
     QVBoxLayout *l = new QVBoxLayout(box);
     GroupTabSetting tabSetting = groupTabSettings.value(groupKey, GroupTabSetting{});
 
-    QCheckBox *autoOnWhenPingable = new QCheckBox("Turn ON when 192.168.42.2 is pingable");
+    QCheckBox *autoOnWhenPingable = new QCheckBox(QString("Turn ON when %1 is pingable").arg(phoneHost));
     autoOnWhenPingable->setChecked(isPresenceAutoOnEnabled(groupKey));
     connect(autoOnWhenPingable, &QCheckBox::toggled, this, [this, groupKey](bool enabled) {
         if (groupKey == "__all__")
@@ -841,7 +847,7 @@ QWidget* MainWindow::createGroupControl(const QVector<QJsonObject> &devices, con
     });
     l->addWidget(autoOnWhenPingable);
 
-    QCheckBox *autoOffWhenNotPingable = new QCheckBox("Turn OFF when 192.168.42.2 is NOT pingable");
+    QCheckBox *autoOffWhenNotPingable = new QCheckBox(QString("Turn OFF when %1 is NOT pingable").arg(phoneHost));
     autoOffWhenNotPingable->setChecked(isPresenceAutoOffEnabled(groupKey));
     connect(autoOffWhenNotPingable, &QCheckBox::toggled, this, [this, groupKey](bool enabled) {
         if (groupKey == "__all__")
@@ -969,6 +975,17 @@ QWidget* MainWindow::createRoutinesTab()
     l->addWidget(edit);
 
     routineList = new QListWidget;
+    connect(routineList, &QListWidget::itemChanged, this, [this](QListWidgetItem *item) {
+        if (!item || !routineList) return;
+        const int row = routineList->row(item);
+        if (row < 0 || row >= routines.size()) return;
+
+        const bool enabled = item->checkState() == Qt::Checked;
+        if (routines[row].enabled == enabled) return;
+
+        routines[row].enabled = enabled;
+        saveRoutines();
+    });
     l->addWidget(routineList);
     refreshRoutineList();
 
@@ -1032,13 +1049,16 @@ bool MainWindow::openRoutineEditor(Routine &routine, const QString &title)
 
     l->addWidget(new QLabel("Schedule Name:"));
     l->addWidget(name);
+    QCheckBox *enabled = new QCheckBox("Enabled");
+    enabled->setChecked(routine.enabled);
+    l->addWidget(enabled);
     l->addWidget(new QLabel("Time:"));
     l->addWidget(time);
     l->addWidget(new QLabel("Ping Condition:"));
     QComboBox *pingCondition = new QComboBox;
     pingCondition->addItem("Run regardless of ping", 0);
-    pingCondition->addItem("Only run when 192.168.42.2 is pingable", 1);
-    pingCondition->addItem("Only run when 192.168.42.2 is NOT pingable", 2);
+    pingCondition->addItem(QString("Only run when %1 is pingable").arg(phoneHost), 1);
+    pingCondition->addItem(QString("Only run when %1 is NOT pingable").arg(phoneHost), 2);
     int pingIndex = pingCondition->findData(qBound(0, routine.phoneCondition, 2));
     if (pingIndex < 0) pingIndex = 0;
     pingCondition->setCurrentIndex(pingIndex);
@@ -1202,6 +1222,7 @@ bool MainWindow::openRoutineEditor(Routine &routine, const QString &title)
     Routine updated;
     updated.time = time->time();
     updated.name = name->text().trimmed().isEmpty() ? "Schedule" : name->text().trimmed();
+    updated.enabled = enabled->isChecked();
     updated.phoneCondition = pingCondition->currentData().toInt();
 
     for (int i = 0; i < dayChecks.size(); ++i) {
@@ -1254,18 +1275,22 @@ void MainWindow::refreshRoutineList()
         return a.name.toLower() < b.name.toLower();
     });
 
+    QSignalBlocker blocker(routineList);
     routineList->clear();
     for (const Routine &r : routines) {
         const QString pingLabel = (r.phoneCondition == 1) ? "Pingable"
                                   : (r.phoneCondition == 2) ? "Not Pingable"
                                                             : "Any Ping State";
-        routineList->addItem(QString("%1 | %2 | %3 | %4 | %5 | %6")
-                                 .arg(r.time.toString("HH:mm"))
-                                 .arg(formatDays(r.days))
-                                 .arg(formatRoutineTargets(r.settings))
-                                 .arg(formatRoutineEffects(r.settings))
-                                 .arg(pingLabel)
-                                 .arg(r.name));
+        QListWidgetItem *item = new QListWidgetItem(QString("%1 | %2 | %3 | %4 | %5 | %6")
+                                                        .arg(r.time.toString("HH:mm"))
+                                                        .arg(formatDays(r.days))
+                                                        .arg(formatRoutineTargets(r.settings))
+                                                        .arg(formatRoutineEffects(r.settings))
+                                                        .arg(pingLabel)
+                                                        .arg(r.name));
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(r.enabled ? Qt::Checked : Qt::Unchecked);
+        routineList->addItem(item);
     }
 }
 
@@ -1293,6 +1318,7 @@ void MainWindow::checkRoutines()
     QTime now = QTime::currentTime();
     bool routineExecuted = false;
     for (const Routine &r : routines) {
+        if (!r.enabled) continue;
         if (!r.days.contains(day)) continue;
         if (r.phoneCondition == 1 && !phoneWasOnline) continue;
         if (r.phoneCondition == 2 && phoneWasOnline) continue;
@@ -1372,6 +1398,41 @@ void MainWindow::removeRoutine()
     routines.removeAt(row);
     saveRoutines();
     refreshRoutineList();
+}
+
+QWidget* MainWindow::createConfigTab()
+{
+    QWidget *w = new QWidget;
+    QVBoxLayout *l = new QVBoxLayout(w);
+
+    l->addWidget(new QLabel("<h2>Config</h2>"));
+
+    QLabel *hint = new QLabel("Set the device/phone host used for ping-based presence checks.");
+    hint->setWordWrap(true);
+    l->addWidget(hint);
+
+    QFormLayout *form = new QFormLayout;
+    QLineEdit *hostEdit = new QLineEdit(phoneHost);
+    hostEdit->setPlaceholderText("192.168.42.2");
+    form->addRow("Ping Host/IP:", hostEdit);
+    l->addLayout(form);
+
+    QPushButton *save = new QPushButton("Save Config");
+    save->setMinimumHeight(40);
+    connect(save, &QPushButton::clicked, this, [this, hostEdit]() {
+        const QString newHost = hostEdit->text().trimmed();
+        if (newHost.isEmpty()) {
+            QMessageBox::warning(this, "Config", "Ping host/IP cannot be empty.");
+            return;
+        }
+        phoneHost = newHost;
+        savePresenceSettings(); // Stored in Lights.json (main settings file).
+        buildUI(); // Rebuild labels that show the host value.
+    });
+    l->addWidget(save, 0, Qt::AlignLeft);
+
+    l->addStretch();
+    return w;
 }
 
 void MainWindow::checkPhonePresence()
@@ -1507,6 +1568,7 @@ void MainWindow::buildUI()
     }
 
     tabWidget->addTab(createRoutinesTab(), "Routines");
+    tabWidget->addTab(createConfigTab(), "Config");
     refreshPowerButtons();
 }
 
