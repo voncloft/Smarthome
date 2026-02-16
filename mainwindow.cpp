@@ -1275,6 +1275,19 @@ void MainWindow::refreshRoutineList()
 
 void MainWindow::checkRoutines()
 {
+    struct DeferredSetting {
+        QString mac;
+        QString sku;
+        bool useBrightness = false;
+        int brightness = 100;
+        bool useTemp = false;
+        int temperature = 4000;
+        bool useColor = false;
+        QColor color = Qt::white;
+    };
+
+    QList<DeferredSetting> deferred;
+
     const QDate today = QDate::currentDate();
     const int day = today.dayOfWeek();
     QTime now = QTime::currentTime();
@@ -1296,15 +1309,50 @@ void MainWindow::checkRoutines()
 
                     if (s.usePower) sendCommand(mac, sku, "devices.capabilities.on_off", "powerSwitch", s.power);
                     if (s.usePower) setDevicePowerState(mac, s.power != 0);
-                    if (s.useBrightness) sendCommand(mac, sku, "devices.capabilities.range", "brightness", s.brightness);
-                    if (s.useTemp) sendCommand(mac, sku, "devices.capabilities.color_setting", "colorTemperatureK", s.temperature);
-                    if (s.useColor) {
-                        int rgb = (s.color.red()<<16)|(s.color.green()<<8)|s.color.blue();
-                        sendCommand(mac, sku, "devices.capabilities.color_setting", "colorRgb", rgb);
+
+                    const bool hasNonPower = s.useBrightness || s.useTemp || s.useColor;
+                    const bool turningOnNow = s.usePower && s.power != 0;
+                    const bool turningOffNow = s.usePower && s.power == 0;
+
+                    // If we just turned a light on, defer routine color/brightness/temp slightly
+                    // so the device accepts the exact scheduled values.
+                    if (turningOnNow && hasNonPower) {
+                        DeferredSetting d;
+                        d.mac = mac;
+                        d.sku = sku;
+                        d.useBrightness = s.useBrightness;
+                        d.brightness = s.brightness;
+                        d.useTemp = s.useTemp;
+                        d.temperature = s.temperature;
+                        d.useColor = s.useColor;
+                        d.color = s.color;
+                        deferred.append(d);
+                    } else if (!turningOffNow) {
+                        if (s.useBrightness) sendCommand(mac, sku, "devices.capabilities.range", "brightness", s.brightness);
+                        if (s.useTemp) sendCommand(mac, sku, "devices.capabilities.color_setting", "colorTemperatureK", s.temperature);
+                        if (s.useColor) {
+                            int rgb = (s.color.red()<<16)|(s.color.green()<<8)|s.color.blue();
+                            sendCommand(mac, sku, "devices.capabilities.color_setting", "colorRgb", rgb);
+                        }
                     }
                 }
             }
         }
+    }
+
+    if (!deferred.isEmpty()) {
+        QTimer::singleShot(700, this, [this, deferred]() {
+            for (const DeferredSetting &d : deferred) {
+                if (d.useBrightness)
+                    sendCommand(d.mac, d.sku, "devices.capabilities.range", "brightness", d.brightness);
+                if (d.useTemp)
+                    sendCommand(d.mac, d.sku, "devices.capabilities.color_setting", "colorTemperatureK", d.temperature);
+                if (d.useColor) {
+                    int rgb = (d.color.red()<<16)|(d.color.green()<<8)|d.color.blue();
+                    sendCommand(d.mac, d.sku, "devices.capabilities.color_setting", "colorRgb", rgb);
+                }
+            }
+        });
     }
 
     if (routineExecuted) {
@@ -1329,18 +1377,29 @@ void MainWindow::removeRoutine()
 void MainWindow::checkPhonePresence()
 {
     if (!pingProcess || pingProcess->state() != QProcess::NotRunning) return;
+    static constexpr int kPresenceConfirmSamples = 2;
 
     connect(pingProcess,
             QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this,
             [this](int exitCode, QProcess::ExitStatus) {
                 const bool nowOnline = (exitCode == 0);
+                if (nowOnline) {
+                    presenceOnlineStreak++;
+                    presenceOfflineStreak = 0;
+                } else {
+                    presenceOfflineStreak++;
+                    presenceOnlineStreak = 0;
+                }
 
                 if (!firstCheckDone) {
                     // Apply presence rules on initial check too, so startup state is enforced.
                     firstCheckDone = true;
-                } else if (nowOnline == phoneWasOnline) {
-                    return;
+                    phoneWasOnline = nowOnline;
+                } else {
+                    if (nowOnline == phoneWasOnline) return;
+                    if (nowOnline && presenceOnlineStreak < kPresenceConfirmSamples) return;
+                    if (!nowOnline && presenceOfflineStreak < kPresenceConfirmSamples) return;
                 }
 
                 phoneWasOnline = nowOnline;

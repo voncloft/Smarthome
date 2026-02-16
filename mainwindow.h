@@ -103,6 +103,8 @@ private:
     QString phoneHost = "192.168.42.2";
     bool phoneWasOnline = false;
     bool firstCheckDone = false;
+    int presenceOnlineStreak = 0;
+    int presenceOfflineStreak = 0;
 
     QString apiKey;
 
