@@ -10,9 +10,11 @@
 #include <QProcess>
 #include <QListWidget>
 #include <QColor>
+#include <QSet>
 
 class QNetworkAccessManager;
 class QPushButton;
+class QLabel;
 
 struct RoutineDeviceSetting {
     QString group; // "__all__" or room key from device name prefix
@@ -43,6 +45,20 @@ struct GroupTabSetting {
     int brightness = 100;
     int temperature = 4000;
     QColor color = Qt::white;
+};
+
+struct RoutineVerifyTarget {
+    QString mac;
+    QString sku;
+    bool expectPower = false;
+    int power = 1;
+    bool expectBrightness = false;
+    int brightness = 100;
+    bool expectTemp = false;
+    int temperature = 4000;
+    bool expectColor = false;
+    QColor color = Qt::white;
+    int retriesRemaining = 12;
 };
 
 class MainWindow : public QMainWindow
@@ -78,6 +94,7 @@ private:
     QWidget* createLightWidget(const QJsonObject &dev);
     QWidget* createGroupControl(const QVector<QJsonObject> &devices, const QString &title, const QString &groupKey);
     QWidget* createRoutinesTab();
+    QWidget* createDiagnosticsTab();
     QWidget* createConfigTab();
 
     bool loadApiKey();
@@ -89,7 +106,16 @@ private:
     void loadRoutines();
     void saveRoutines() const;
     void refreshRoutineList();
+    void refreshRoutineVerifyDiagnostics();
+    void addRoutineVerifyRecent(const QString &entry);
     bool openRoutineEditor(Routine &routine, const QString &title);
+    void enqueueRoutineVerification(const QString &mac, const QString &sku,
+                                    bool expectPower, int power,
+                                    bool expectBrightness, int brightness,
+                                    bool expectTemp, int temperature,
+                                    bool expectColor, const QColor &color);
+    void processRoutineVerificationTick();
+    void verifyRoutineTargetNow(const QString &mac);
 
 private:
     QNetworkAccessManager *nam = nullptr;
@@ -100,6 +126,7 @@ private:
 
     QTimer *presenceTimer = nullptr;
     QTimer *routineTimer = nullptr;
+    QTimer *routineVerifyTimer = nullptr;
 
     QProcess *pingProcess = nullptr;
     QString phoneHost = "192.168.42.2";
@@ -116,11 +143,16 @@ private:
 
     QList<Routine> routines;
     QListWidget *routineList = nullptr;
+    QLabel *routineVerifySummaryLabel = nullptr;
+    QListWidget *routineVerifyList = nullptr;
     bool presenceAutoOnAllGroups = true;
     bool presenceAutoOffAllGroups = false;
     QMap<QString, bool> presenceAutoOnGroupEnabled;
     QMap<QString, bool> presenceAutoOffGroupEnabled;
     QMap<QString, GroupTabSetting> groupTabSettings;
+    QMap<QString, RoutineVerifyTarget> routineVerifyTargets;
+    QSet<QString> routineVerifyInFlight;
+    QStringList routineVerifyRecentEntries;
 };
 
 #endif

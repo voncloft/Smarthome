@@ -47,6 +47,13 @@ static bool parsePowerState(const QJsonValue &value)
     return text == "1" || text == "on" || text == "true";
 }
 
+static bool colorsClose(const QColor &a, const QColor &b, int tolerance = 4)
+{
+    return qAbs(a.red() - b.red()) <= tolerance
+           && qAbs(a.green() - b.green()) <= tolerance
+           && qAbs(a.blue() - b.blue()) <= tolerance;
+}
+
 static QString weekdayLabel(int day)
 {
     static const QStringList labels = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
@@ -218,9 +225,12 @@ MainWindow::MainWindow(QWidget *parent)
     pingProcess = new QProcess(this);
     presenceTimer = new QTimer(this);
     routineTimer = new QTimer(this);
+    routineVerifyTimer = new QTimer(this);
+    routineVerifyTimer->setInterval(3000);
 
     connect(presenceTimer, &QTimer::timeout, this, &MainWindow::checkPhonePresence);
     connect(routineTimer, &QTimer::timeout, this, &MainWindow::checkRoutines);
+    connect(routineVerifyTimer, &QTimer::timeout, this, &MainWindow::processRoutineVerificationTick);
 
     presenceTimer->start(8000);     // unchanged
     routineTimer->start(60000);     // unchanged
@@ -998,6 +1008,26 @@ QWidget* MainWindow::createRoutinesTab()
     return w;
 }
 
+QWidget* MainWindow::createDiagnosticsTab()
+{
+    QWidget *w = new QWidget;
+    QVBoxLayout *l = new QVBoxLayout(w);
+
+    l->addWidget(new QLabel("<h2>Routine Verification Diagnostics</h2>"));
+
+    routineVerifySummaryLabel = new QLabel("No active routine verification checks.");
+    routineVerifySummaryLabel->setWordWrap(true);
+    l->addWidget(routineVerifySummaryLabel);
+
+    routineVerifyList = new QListWidget;
+    routineVerifyList->setSelectionMode(QAbstractItemView::NoSelection);
+    routineVerifyList->setFocusPolicy(Qt::NoFocus);
+    routineVerifyList->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    l->addWidget(routineVerifyList);
+    refreshRoutineVerifyDiagnostics();
+    return w;
+}
+
 // ==========================================================================
 // ADD ROUTINE — SELECT DEVICES / GROUP / SETTINGS
 // ==========================================================================
@@ -1294,6 +1324,58 @@ void MainWindow::refreshRoutineList()
     }
 }
 
+void MainWindow::refreshRoutineVerifyDiagnostics()
+{
+    if (!routineVerifySummaryLabel || !routineVerifyList)
+        return;
+
+    if (routineVerifyTargets.isEmpty())
+        routineVerifySummaryLabel->setText(
+            QString("No active checks. Recent results kept: %1.").arg(routineVerifyRecentEntries.size()));
+    else
+        routineVerifySummaryLabel->setText(
+            QString("Active checks: %1 device(s). Poll interval: 3s. Recent results: %2.")
+                .arg(routineVerifyTargets.size())
+                .arg(routineVerifyRecentEntries.size()));
+
+    routineVerifyList->clear();
+
+    const QStringList macs = routineVerifyTargets.keys();
+    for (const QString &mac : macs) {
+        const RoutineVerifyTarget t = routineVerifyTargets.value(mac);
+        QStringList expected;
+        if (t.expectPower) expected << QString("Power=%1").arg(t.power ? "ON" : "OFF");
+        if (t.expectBrightness) expected << QString("Brightness=%1%").arg(t.brightness);
+        if (t.expectColor) expected << QString("Color=%1").arg(t.color.name(QColor::HexRgb).toUpper());
+        else if (t.expectTemp) expected << QString("Temp=%1K").arg(t.temperature);
+        if (expected.isEmpty()) expected << "No expected capabilities";
+
+        const QString inFlight = routineVerifyInFlight.contains(mac) ? " [checking...]" : "";
+        routineVerifyList->addItem(QString("%1 (%2): %3 | retries left: %4%5")
+                                       .arg(mac)
+                                       .arg(t.sku)
+                                       .arg(expected.join(", "))
+                                       .arg(t.retriesRemaining)
+                                       .arg(inFlight));
+    }
+
+    if (!routineVerifyRecentEntries.isEmpty()) {
+        routineVerifyList->addItem("----- Recent Results -----");
+        for (const QString &line : routineVerifyRecentEntries)
+            routineVerifyList->addItem(line);
+    }
+}
+
+void MainWindow::addRoutineVerifyRecent(const QString &entry)
+{
+    const QString line = QString("[%1] %2")
+                             .arg(QTime::currentTime().toString("HH:mm:ss"))
+                             .arg(entry);
+    routineVerifyRecentEntries.prepend(line);
+    while (routineVerifyRecentEntries.size() > 40)
+        routineVerifyRecentEntries.removeLast();
+}
+
 // ==========================================================================
 // EXECUTE ROUTINES — SEND ALL DEVICE SETTINGS
 // ==========================================================================
@@ -1303,6 +1385,8 @@ void MainWindow::checkRoutines()
     struct DeferredSetting {
         QString mac;
         QString sku;
+        bool usePower = false;
+        int power = 1;
         bool useBrightness = false;
         int brightness = 100;
         bool useTemp = false;
@@ -1312,6 +1396,7 @@ void MainWindow::checkRoutines()
     };
 
     QList<DeferredSetting> deferred;
+    QMap<QString, DeferredSetting> desiredFinal;
 
     const QDate today = QDate::currentDate();
     const int day = today.dayOfWeek();
@@ -1332,6 +1417,35 @@ void MainWindow::checkRoutines()
 
                     const QString mac = dev["device"].toString();
                     const QString sku = dev["sku"].toString();
+                    const bool preferColor = s.useColor;
+                    const bool applyTemp = s.useTemp && !preferColor;
+                    DeferredSetting &final = desiredFinal[mac];
+                    final.mac = mac;
+                    final.sku = sku;
+                    if (s.usePower) {
+                        final.usePower = true;
+                        final.power = (s.power != 0) ? 1 : 0;
+                        if (final.power == 0) {
+                            final.useBrightness = false;
+                            final.useTemp = false;
+                            final.useColor = false;
+                        }
+                    }
+                    if (s.useBrightness && (!final.usePower || final.power != 0)) {
+                        final.useBrightness = true;
+                        final.brightness = s.brightness;
+                    }
+                    if (!final.usePower || final.power != 0) {
+                        if (preferColor) {
+                            final.useColor = true;
+                            final.color = s.color;
+                            final.useTemp = false;
+                        } else if (applyTemp) {
+                            final.useTemp = true;
+                            final.temperature = s.temperature;
+                            final.useColor = false;
+                        }
+                    }
 
                     if (s.usePower) sendCommand(mac, sku, "devices.capabilities.on_off", "powerSwitch", s.power);
                     if (s.usePower) setDevicePowerState(mac, s.power != 0);
@@ -1348,17 +1462,18 @@ void MainWindow::checkRoutines()
                         d.sku = sku;
                         d.useBrightness = s.useBrightness;
                         d.brightness = s.brightness;
-                        d.useTemp = s.useTemp;
+                        d.useTemp = applyTemp;
                         d.temperature = s.temperature;
-                        d.useColor = s.useColor;
+                        d.useColor = preferColor;
                         d.color = s.color;
                         deferred.append(d);
                     } else if (!turningOffNow) {
                         if (s.useBrightness) sendCommand(mac, sku, "devices.capabilities.range", "brightness", s.brightness);
-                        if (s.useTemp) sendCommand(mac, sku, "devices.capabilities.color_setting", "colorTemperatureK", s.temperature);
-                        if (s.useColor) {
+                        if (preferColor) {
                             int rgb = (s.color.red()<<16)|(s.color.green()<<8)|s.color.blue();
                             sendCommand(mac, sku, "devices.capabilities.color_setting", "colorRgb", rgb);
+                        } else if (applyTemp) {
+                            sendCommand(mac, sku, "devices.capabilities.color_setting", "colorTemperatureK", s.temperature);
                         }
                     }
                 }
@@ -1367,17 +1482,38 @@ void MainWindow::checkRoutines()
     }
 
     if (!deferred.isEmpty()) {
-        QTimer::singleShot(700, this, [this, deferred]() {
+        QTimer::singleShot(1200, this, [this, deferred]() {
             for (const DeferredSetting &d : deferred) {
                 if (d.useBrightness)
                     sendCommand(d.mac, d.sku, "devices.capabilities.range", "brightness", d.brightness);
-                if (d.useTemp)
-                    sendCommand(d.mac, d.sku, "devices.capabilities.color_setting", "colorTemperatureK", d.temperature);
                 if (d.useColor) {
-                    int rgb = (d.color.red()<<16)|(d.color.green()<<8)|d.color.blue();
+                    const int rgb = (d.color.red() << 16) | (d.color.green() << 8) | d.color.blue();
                     sendCommand(d.mac, d.sku, "devices.capabilities.color_setting", "colorRgb", rgb);
+                    // Some bulbs ignore the first color command right after power-on; retry once.
+                    QTimer::singleShot(900, this, [this, d, rgb]() {
+                        if (d.useColor)
+                            sendCommand(d.mac, d.sku, "devices.capabilities.color_setting", "colorRgb", rgb);
+                    });
+                } else if (d.useTemp) {
+                    sendCommand(d.mac, d.sku, "devices.capabilities.color_setting", "colorTemperatureK", d.temperature);
                 }
             }
+        });
+    }
+
+    if (!desiredFinal.isEmpty()) {
+        QTimer::singleShot(2500, this, [this, desiredFinal]() {
+            for (auto it = desiredFinal.begin(); it != desiredFinal.end(); ++it) {
+                const DeferredSetting &d = it.value();
+                enqueueRoutineVerification(d.mac, d.sku,
+                                           d.usePower, d.power,
+                                           d.useBrightness, d.brightness,
+                                           d.useTemp, d.temperature,
+                                           d.useColor, d.color);
+            }
+            processRoutineVerificationTick();
+            if (!routineVerifyTargets.isEmpty() && routineVerifyTimer && !routineVerifyTimer->isActive())
+                routineVerifyTimer->start();
         });
     }
 
@@ -1386,6 +1522,244 @@ void MainWindow::checkRoutines()
         // Pull fresh device state shortly after routine commands so UI text matches real hardware state.
         QTimer::singleShot(1500, this, &MainWindow::refreshDevices);
     }
+}
+
+void MainWindow::enqueueRoutineVerification(const QString &mac, const QString &sku,
+                                            bool expectPower, int power,
+                                            bool expectBrightness, int brightness,
+                                            bool expectTemp, int temperature,
+                                            bool expectColor, const QColor &color)
+{
+    if (mac.isEmpty() || sku.isEmpty())
+        return;
+
+    RoutineVerifyTarget target;
+    target.mac = mac;
+    target.sku = sku;
+    target.expectPower = expectPower;
+    target.power = (power != 0) ? 1 : 0;
+    target.expectBrightness = expectBrightness;
+    target.brightness = qBound(1, brightness, 100);
+    target.expectColor = expectColor;
+    target.color = color.isValid() ? color : QColor(Qt::white);
+    target.expectTemp = expectTemp && !target.expectColor;
+    target.temperature = qBound(2000, temperature, 9000);
+    target.retriesRemaining = 12;
+
+    if (target.expectPower && target.power == 0) {
+        target.expectBrightness = false;
+        target.expectTemp = false;
+        target.expectColor = false;
+    }
+
+    if (routineVerifyTargets.contains(mac)) {
+        RoutineVerifyTarget merged = routineVerifyTargets.value(mac);
+        merged.sku = target.sku;
+        if (target.expectPower) {
+            merged.expectPower = true;
+            merged.power = target.power;
+            if (merged.power == 0) {
+                merged.expectBrightness = false;
+                merged.expectTemp = false;
+                merged.expectColor = false;
+            }
+        }
+        if ((!merged.expectPower || merged.power != 0) && target.expectBrightness) {
+            merged.expectBrightness = true;
+            merged.brightness = target.brightness;
+        }
+        if (!merged.expectPower || merged.power != 0) {
+            if (target.expectColor) {
+                merged.expectColor = true;
+                merged.color = target.color;
+                merged.expectTemp = false;
+            } else if (target.expectTemp) {
+                merged.expectTemp = true;
+                merged.temperature = target.temperature;
+                merged.expectColor = false;
+            }
+        }
+        merged.retriesRemaining = qMax(merged.retriesRemaining, target.retriesRemaining);
+        routineVerifyTargets[mac] = merged;
+    } else {
+        routineVerifyTargets.insert(mac, target);
+    }
+    refreshRoutineVerifyDiagnostics();
+}
+
+void MainWindow::processRoutineVerificationTick()
+{
+    if (routineVerifyTargets.isEmpty()) {
+        if (routineVerifyTimer && routineVerifyTimer->isActive())
+            routineVerifyTimer->stop();
+        refreshRoutineVerifyDiagnostics();
+        return;
+    }
+
+    const QStringList macs = routineVerifyTargets.keys();
+    for (const QString &mac : macs) {
+        if (routineVerifyInFlight.contains(mac))
+            continue;
+        verifyRoutineTargetNow(mac);
+    }
+
+    if (routineVerifyTargets.isEmpty() && routineVerifyTimer && routineVerifyTimer->isActive())
+        routineVerifyTimer->stop();
+    refreshRoutineVerifyDiagnostics();
+}
+
+void MainWindow::verifyRoutineTargetNow(const QString &mac)
+{
+    if (!routineVerifyTargets.contains(mac))
+        return;
+
+    const RoutineVerifyTarget target = routineVerifyTargets.value(mac);
+    if (target.mac.isEmpty() || target.sku.isEmpty()) {
+        addRoutineVerifyRecent(QString("%1 (%2): dropped invalid target").arg(target.mac, target.sku));
+        routineVerifyTargets.remove(mac);
+        return;
+    }
+
+    routineVerifyInFlight.insert(mac);
+    refreshRoutineVerifyDiagnostics();
+
+    QJsonObject payload{
+        {"sku", target.sku},
+        {"device", target.mac}
+    };
+
+    QJsonObject root{
+        {"requestId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+        {"payload", payload}
+    };
+
+    QNetworkRequest req(QUrl("https://openapi.api.govee.com/router/api/v1/device/state"));
+    req.setRawHeader("Govee-API-Key", apiKey.toUtf8());
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+    QNetworkReply *reply = nam->post(req, QJsonDocument(root).toJson());
+    connect(reply, &QNetworkReply::finished, this, [this, mac, target, reply]() {
+        routineVerifyInFlight.remove(mac);
+        reply->deleteLater();
+
+        if (!routineVerifyTargets.contains(mac))
+            return;
+
+        RoutineVerifyTarget current = routineVerifyTargets.value(mac);
+
+        if (reply->error() != QNetworkReply::NoError) {
+            current.retriesRemaining--;
+            if (current.retriesRemaining <= 0) {
+                addRoutineVerifyRecent(QString("%1 (%2): failed (network error), giving up")
+                                           .arg(current.mac, current.sku));
+                routineVerifyTargets.remove(mac);
+            } else {
+                addRoutineVerifyRecent(QString("%1 (%2): network error, will retry (%3 left)")
+                                           .arg(current.mac, current.sku)
+                                           .arg(current.retriesRemaining));
+                routineVerifyTargets[mac] = current;
+            }
+            refreshRoutineVerifyDiagnostics();
+            return;
+        }
+
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        const QJsonObject rootObj = doc.object();
+        if (rootObj.value("code").toInt(-1) != 200) {
+            current.retriesRemaining--;
+            if (current.retriesRemaining <= 0) {
+                addRoutineVerifyRecent(QString("%1 (%2): failed (API state error), giving up")
+                                           .arg(current.mac, current.sku));
+                routineVerifyTargets.remove(mac);
+            } else {
+                addRoutineVerifyRecent(QString("%1 (%2): API state error, will retry (%3 left)")
+                                           .arg(current.mac, current.sku)
+                                           .arg(current.retriesRemaining));
+                routineVerifyTargets[mac] = current;
+            }
+            refreshRoutineVerifyDiagnostics();
+            return;
+        }
+
+        const QJsonArray caps = rootObj.value("payload").toObject().value("capabilities").toArray();
+        bool hasPower = false;
+        bool powerOn = false;
+        bool hasBrightness = false;
+        int brightness = -1;
+        bool hasTemp = false;
+        int temperature = -1;
+        bool hasColor = false;
+        QColor color = Qt::black;
+
+        for (const QJsonValue &cv : caps) {
+            const QJsonObject cap = cv.toObject();
+            const QString inst = cap.value("instance").toString();
+            const QJsonObject state = cap.value("state").toObject();
+            const QJsonValue val = state.value("value");
+
+            if (inst == "powerSwitch") {
+                hasPower = true;
+                powerOn = parsePowerState(val);
+            } else if (inst == "brightness") {
+                hasBrightness = true;
+                brightness = val.toInt();
+            } else if (inst == "colorTemperatureK") {
+                hasTemp = true;
+                temperature = val.toInt();
+            } else if (inst == "colorRgb") {
+                hasColor = true;
+                const int rgb = val.toInt();
+                color = QColor((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
+            }
+        }
+
+        bool ok = true;
+        if (current.expectPower && (!hasPower || powerOn != (current.power != 0)))
+            ok = false;
+        if (ok && current.expectPower && current.power == 0) {
+            addRoutineVerifyRecent(QString("%1 (%2): verified OFF").arg(current.mac, current.sku));
+            routineVerifyTargets.remove(mac);
+            refreshRoutineVerifyDiagnostics();
+            return;
+        }
+        if (ok && current.expectBrightness && (!hasBrightness || brightness != current.brightness))
+            ok = false;
+        if (ok && current.expectColor && (!hasColor || !colorsClose(color, current.color)))
+            ok = false;
+        if (ok && current.expectTemp && (!hasTemp || temperature != current.temperature))
+            ok = false;
+
+        if (ok) {
+            addRoutineVerifyRecent(QString("%1 (%2): verified expected state").arg(current.mac, current.sku));
+            routineVerifyTargets.remove(mac);
+            refreshRoutineVerifyDiagnostics();
+            return;
+        }
+
+        if (current.expectPower && hasPower && powerOn != (current.power != 0))
+            sendCommand(current.mac, current.sku, "devices.capabilities.on_off", "powerSwitch", current.power);
+        if (current.expectBrightness && (!hasBrightness || brightness != current.brightness))
+            sendCommand(current.mac, current.sku, "devices.capabilities.range", "brightness", current.brightness);
+        if (current.expectColor && (!hasColor || !colorsClose(color, current.color))) {
+            const int rgb = (current.color.red() << 16) | (current.color.green() << 8) | current.color.blue();
+            sendCommand(current.mac, current.sku, "devices.capabilities.color_setting", "colorRgb", rgb);
+        } else if (current.expectTemp && (!hasTemp || temperature != current.temperature)) {
+            sendCommand(current.mac, current.sku, "devices.capabilities.color_setting", "colorTemperatureK", current.temperature);
+        }
+
+        current.retriesRemaining--;
+        if (current.retriesRemaining <= 0) {
+            addRoutineVerifyRecent(QString("%1 (%2): mismatch persisted, giving up")
+                                       .arg(current.mac, current.sku));
+            routineVerifyTargets.remove(mac);
+        } else {
+            addRoutineVerifyRecent(QString("%1 (%2): mismatch corrected/retry sent (%3 left)")
+                                       .arg(current.mac, current.sku)
+                                       .arg(current.retriesRemaining));
+            routineVerifyTargets[mac] = current;
+        }
+        refreshRoutineVerifyDiagnostics();
+    });
 }
 
 void MainWindow::removeRoutine()
@@ -1568,6 +1942,7 @@ void MainWindow::buildUI()
     }
 
     tabWidget->addTab(createRoutinesTab(), "Routines");
+    tabWidget->addTab(createDiagnosticsTab(), "Diagnostics");
     tabWidget->addTab(createConfigTab(), "Config");
     refreshPowerButtons();
 }
