@@ -1340,23 +1340,34 @@ void MainWindow::refreshRoutineVerifyDiagnostics()
 
     routineVerifyList->clear();
 
+    auto currentStateText = [](const RoutineVerifyTarget &t) -> QString {
+        QStringList parts;
+        if (t.hasObservedPower) parts << QString("power=%1").arg(t.observedPowerOn ? "on" : "off");
+        if (t.hasObservedBrightness) parts << QString("brightness=%1").arg(t.observedBrightness);
+        if (t.hasObservedColor) parts << QString("color=%1").arg(t.observedColor.name(QColor::HexRgb).toUpper());
+        else if (t.hasObservedTemp) parts << QString("temp=%1K").arg(t.observedTemp);
+        return parts.isEmpty() ? "unknown" : parts.join(", ");
+    };
+    auto expectedStateText = [](const RoutineVerifyTarget &t) -> QString {
+        QStringList parts;
+        if (t.expectPower) parts << QString("power=%1").arg(t.power ? "on" : "off");
+        if (t.expectBrightness) parts << QString("brightness=%1").arg(t.brightness);
+        if (t.expectColor) parts << QString("color=%1").arg(t.color.name(QColor::HexRgb).toUpper());
+        else if (t.expectTemp) parts << QString("temp=%1K").arg(t.temperature);
+        return parts.isEmpty() ? "none" : parts.join(", ");
+    };
+
     const QStringList macs = routineVerifyTargets.keys();
     for (const QString &mac : macs) {
         const RoutineVerifyTarget t = routineVerifyTargets.value(mac);
-        QStringList expected;
-        if (t.expectPower) expected << QString("Power=%1").arg(t.power ? "ON" : "OFF");
-        if (t.expectBrightness) expected << QString("Brightness=%1%").arg(t.brightness);
-        if (t.expectColor) expected << QString("Color=%1").arg(t.color.name(QColor::HexRgb).toUpper());
-        else if (t.expectTemp) expected << QString("Temp=%1K").arg(t.temperature);
-        if (expected.isEmpty()) expected << "No expected capabilities";
-
-        const QString inFlight = routineVerifyInFlight.contains(mac) ? " [checking...]" : "";
-        routineVerifyList->addItem(QString("%1 (%2): %3 | retries left: %4%5")
-                                       .arg(mac)
-                                       .arg(t.sku)
-                                       .arg(expected.join(", "))
-                                       .arg(t.retriesRemaining)
-                                       .arg(inFlight));
+        const QString status = routineVerifyInFlight.contains(mac)
+                                   ? QString("not verified (checking, retries=%1)").arg(t.retriesRemaining)
+                                   : QString("not verified (retries=%1)").arg(t.retriesRemaining);
+        routineVerifyList->addItem(QString("%1 -> %2 -> %3 -> %4")
+                                       .arg(lightLabelForMac(mac))
+                                       .arg(currentStateText(t))
+                                       .arg(expectedStateText(t))
+                                       .arg(status));
     }
 
     if (!routineVerifyRecentEntries.isEmpty()) {
@@ -1364,6 +1375,20 @@ void MainWindow::refreshRoutineVerifyDiagnostics()
         for (const QString &line : routineVerifyRecentEntries)
             routineVerifyList->addItem(line);
     }
+}
+
+QString MainWindow::lightLabelForMac(const QString &mac) const
+{
+    for (const QJsonValue &v : deviceList) {
+        const QJsonObject dev = v.toObject();
+        if (dev.value("device").toString() != mac)
+            continue;
+        const QString name = dev.value("deviceName").toString().trimmed();
+        if (!name.isEmpty())
+            return name;
+        break;
+    }
+    return mac;
 }
 
 void MainWindow::addRoutineVerifyRecent(const QString &entry)
@@ -1615,7 +1640,8 @@ void MainWindow::verifyRoutineTargetNow(const QString &mac)
 
     const RoutineVerifyTarget target = routineVerifyTargets.value(mac);
     if (target.mac.isEmpty() || target.sku.isEmpty()) {
-        addRoutineVerifyRecent(QString("%1 (%2): dropped invalid target").arg(target.mac, target.sku));
+        addRoutineVerifyRecent(QString("%1 -> unknown -> unknown -> not verified")
+                                   .arg(lightLabelForMac(target.mac)));
         routineVerifyTargets.remove(mac);
         return;
     }
@@ -1650,13 +1676,12 @@ void MainWindow::verifyRoutineTargetNow(const QString &mac)
         if (reply->error() != QNetworkReply::NoError) {
             current.retriesRemaining--;
             if (current.retriesRemaining <= 0) {
-                addRoutineVerifyRecent(QString("%1 (%2): failed (network error), giving up")
-                                           .arg(current.mac, current.sku));
+                addRoutineVerifyRecent(QString("%1 -> unknown -> unknown -> not verified")
+                                           .arg(lightLabelForMac(current.mac)));
                 routineVerifyTargets.remove(mac);
             } else {
-                addRoutineVerifyRecent(QString("%1 (%2): network error, will retry (%3 left)")
-                                           .arg(current.mac, current.sku)
-                                           .arg(current.retriesRemaining));
+                addRoutineVerifyRecent(QString("%1 -> unknown -> unknown -> not verified")
+                                           .arg(lightLabelForMac(current.mac)));
                 routineVerifyTargets[mac] = current;
             }
             refreshRoutineVerifyDiagnostics();
@@ -1668,13 +1693,12 @@ void MainWindow::verifyRoutineTargetNow(const QString &mac)
         if (rootObj.value("code").toInt(-1) != 200) {
             current.retriesRemaining--;
             if (current.retriesRemaining <= 0) {
-                addRoutineVerifyRecent(QString("%1 (%2): failed (API state error), giving up")
-                                           .arg(current.mac, current.sku));
+                addRoutineVerifyRecent(QString("%1 -> unknown -> unknown -> not verified")
+                                           .arg(lightLabelForMac(current.mac)));
                 routineVerifyTargets.remove(mac);
             } else {
-                addRoutineVerifyRecent(QString("%1 (%2): API state error, will retry (%3 left)")
-                                           .arg(current.mac, current.sku)
-                                           .arg(current.retriesRemaining));
+                addRoutineVerifyRecent(QString("%1 -> unknown -> unknown -> not verified")
+                                           .arg(lightLabelForMac(current.mac)));
                 routineVerifyTargets[mac] = current;
             }
             refreshRoutineVerifyDiagnostics();
@@ -1713,11 +1737,30 @@ void MainWindow::verifyRoutineTargetNow(const QString &mac)
             }
         }
 
+        current.hasObservedPower = hasPower;
+        current.observedPowerOn = powerOn;
+        current.hasObservedBrightness = hasBrightness;
+        current.observedBrightness = brightness;
+        current.hasObservedTemp = hasTemp;
+        current.observedTemp = temperature;
+        current.hasObservedColor = hasColor;
+        current.observedColor = color;
+
         bool ok = true;
         if (current.expectPower && (!hasPower || powerOn != (current.power != 0)))
             ok = false;
         if (ok && current.expectPower && current.power == 0) {
-            addRoutineVerifyRecent(QString("%1 (%2): verified OFF").arg(current.mac, current.sku));
+            QStringList cur;
+            if (current.hasObservedPower) cur << QString("power=%1").arg(current.observedPowerOn ? "on" : "off");
+            if (current.hasObservedBrightness) cur << QString("brightness=%1").arg(current.observedBrightness);
+            if (current.hasObservedColor) cur << QString("color=%1").arg(current.observedColor.name(QColor::HexRgb).toUpper());
+            else if (current.hasObservedTemp) cur << QString("temp=%1K").arg(current.observedTemp);
+            QStringList exp;
+            if (current.expectPower) exp << QString("power=%1").arg(current.power ? "on" : "off");
+            addRoutineVerifyRecent(QString("%1 -> %2 -> %3 -> verified")
+                                       .arg(lightLabelForMac(current.mac))
+                                       .arg(cur.isEmpty() ? "unknown" : cur.join(", "))
+                                       .arg(exp.isEmpty() ? "none" : exp.join(", ")));
             routineVerifyTargets.remove(mac);
             refreshRoutineVerifyDiagnostics();
             return;
@@ -1730,7 +1773,20 @@ void MainWindow::verifyRoutineTargetNow(const QString &mac)
             ok = false;
 
         if (ok) {
-            addRoutineVerifyRecent(QString("%1 (%2): verified expected state").arg(current.mac, current.sku));
+            QStringList cur;
+            if (current.hasObservedPower) cur << QString("power=%1").arg(current.observedPowerOn ? "on" : "off");
+            if (current.hasObservedBrightness) cur << QString("brightness=%1").arg(current.observedBrightness);
+            if (current.hasObservedColor) cur << QString("color=%1").arg(current.observedColor.name(QColor::HexRgb).toUpper());
+            else if (current.hasObservedTemp) cur << QString("temp=%1K").arg(current.observedTemp);
+            QStringList exp;
+            if (current.expectPower) exp << QString("power=%1").arg(current.power ? "on" : "off");
+            if (current.expectBrightness) exp << QString("brightness=%1").arg(current.brightness);
+            if (current.expectColor) exp << QString("color=%1").arg(current.color.name(QColor::HexRgb).toUpper());
+            else if (current.expectTemp) exp << QString("temp=%1K").arg(current.temperature);
+            addRoutineVerifyRecent(QString("%1 -> %2 -> %3 -> verified")
+                                       .arg(lightLabelForMac(current.mac))
+                                       .arg(cur.isEmpty() ? "unknown" : cur.join(", "))
+                                       .arg(exp.isEmpty() ? "none" : exp.join(", ")));
             routineVerifyTargets.remove(mac);
             refreshRoutineVerifyDiagnostics();
             return;
@@ -1749,13 +1805,26 @@ void MainWindow::verifyRoutineTargetNow(const QString &mac)
 
         current.retriesRemaining--;
         if (current.retriesRemaining <= 0) {
-            addRoutineVerifyRecent(QString("%1 (%2): mismatch persisted, giving up")
-                                       .arg(current.mac, current.sku));
+            QStringList cur;
+            if (current.hasObservedPower) cur << QString("power=%1").arg(current.observedPowerOn ? "on" : "off");
+            if (current.hasObservedBrightness) cur << QString("brightness=%1").arg(current.observedBrightness);
+            if (current.hasObservedColor) cur << QString("color=%1").arg(current.observedColor.name(QColor::HexRgb).toUpper());
+            else if (current.hasObservedTemp) cur << QString("temp=%1K").arg(current.observedTemp);
+            QStringList exp;
+            if (current.expectPower) exp << QString("power=%1").arg(current.power ? "on" : "off");
+            if (current.expectBrightness) exp << QString("brightness=%1").arg(current.brightness);
+            if (current.expectColor) exp << QString("color=%1").arg(current.color.name(QColor::HexRgb).toUpper());
+            else if (current.expectTemp) exp << QString("temp=%1K").arg(current.temperature);
+            addRoutineVerifyRecent(QString("%1 -> %2 -> %3 -> not verified")
+                                       .arg(lightLabelForMac(current.mac))
+                                       .arg(cur.isEmpty() ? "unknown" : cur.join(", "))
+                                       .arg(exp.isEmpty() ? "none" : exp.join(", ")));
             routineVerifyTargets.remove(mac);
         } else {
-            addRoutineVerifyRecent(QString("%1 (%2): mismatch corrected/retry sent (%3 left)")
-                                       .arg(current.mac, current.sku)
-                                       .arg(current.retriesRemaining));
+            addRoutineVerifyRecent(QString("%1 -> %2 -> %3 -> not verified")
+                                       .arg(lightLabelForMac(current.mac))
+                                       .arg(current.hasObservedPower ? QString("power=%1").arg(current.observedPowerOn ? "on" : "off") : "unknown")
+                                       .arg(current.expectPower ? QString("power=%1").arg(current.power ? "on" : "off") : "unknown"));
             routineVerifyTargets[mac] = current;
         }
         refreshRoutineVerifyDiagnostics();
@@ -1869,6 +1938,11 @@ void MainWindow::checkPhonePresence()
 
 void MainWindow::buildUI()
 {
+    const int previousIndex = tabWidget->currentIndex();
+    const QString previousTabId = (previousIndex >= 0)
+                                      ? tabWidget->tabBar()->tabData(previousIndex).toString()
+                                      : QString();
+
     tabWidget->clear();
 
     QVector<QJsonObject> allLights;
@@ -1891,6 +1965,11 @@ void MainWindow::buildUI()
                        b.value("deviceName").toString(), Qt::CaseInsensitive) < 0;
         });
         return devices;
+    };
+
+    auto addTabWithId = [this](QWidget *page, const QString &title, const QString &id) {
+        const int idx = tabWidget->addTab(page, title);
+        tabWidget->tabBar()->setTabData(idx, id);
     };
 
     {
@@ -1917,7 +1996,7 @@ void MainWindow::buildUI()
 
         lay->addStretch();
         sa->setWidget(content);
-        tabWidget->addTab(sa, "All Lights (" + QString::number(allLights.size()) + ")");
+        addTabWithId(sa, "All Lights (" + QString::number(allLights.size()) + ")", "__tab_all_lights__");
     }
 
     QStringList rooms = groups.keys();
@@ -1938,12 +2017,22 @@ void MainWindow::buildUI()
 
         lay->addStretch();
         sa->setWidget(content);
-        tabWidget->addTab(sa, room + " (" + QString::number(groups[room].size()) + ")");
+        addTabWithId(sa, room + " (" + QString::number(groups[room].size()) + ")", "__tab_room__:" + room);
     }
 
-    tabWidget->addTab(createRoutinesTab(), "Routines");
-    tabWidget->addTab(createDiagnosticsTab(), "Diagnostics");
-    tabWidget->addTab(createConfigTab(), "Config");
+    addTabWithId(createRoutinesTab(), "Routines", "__tab_routines__");
+    addTabWithId(createDiagnosticsTab(), "Diagnostics", "__tab_diagnostics__");
+    addTabWithId(createConfigTab(), "Config", "__tab_config__");
+
+    if (!previousTabId.isEmpty()) {
+        for (int i = 0; i < tabWidget->count(); ++i) {
+            if (tabWidget->tabBar()->tabData(i).toString() == previousTabId) {
+                tabWidget->setCurrentIndex(i);
+                break;
+            }
+        }
+    }
+
     refreshPowerButtons();
 }
 

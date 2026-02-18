@@ -59,6 +59,15 @@ struct RoutineVerifyTarget {
     bool expectColor = false;
     QColor color = Qt::white;
     int retriesRemaining = 12;
+
+    bool hasObservedPower = false;
+    bool observedPowerOn = false;
+    bool hasObservedBrightness = false;
+    int observedBrightness = -1;
+    bool hasObservedTemp = false;
+    int observedTemp = -1;
+    bool hasObservedColor = false;
+    QColor observedColor = Qt::black;
 };
 
 class MainWindow : public QMainWindow
@@ -107,6 +116,7 @@ private:
     void saveRoutines() const;
     void refreshRoutineList();
     void refreshRoutineVerifyDiagnostics();
+    QString lightLabelForMac(const QString &mac) const;
     void addRoutineVerifyRecent(const QString &entry);
     bool openRoutineEditor(Routine &routine, const QString &title);
     void enqueueRoutineVerification(const QString &mac, const QString &sku,
