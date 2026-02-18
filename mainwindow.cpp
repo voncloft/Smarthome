@@ -36,7 +36,13 @@
 #include <QAction>
 #include <QUuid>
 #include <QSignalBlocker>
+#include <QMediaDevices>
+#include <QAudioDevice>
+#include <QAudioFormat>
+#include <QAudioSource>
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 
 static bool parsePowerState(const QJsonValue &value)
 {
@@ -69,6 +75,34 @@ static QString formatDays(const QList<int> &days)
     QStringList out;
     for (int day : days) out << weekdayLabel(day);
     return out.join(", ");
+}
+
+static QString runCommandCaptureStdout(const QString &program, const QStringList &args, int timeoutMs = 1500)
+{
+    QProcess p;
+    p.start(program, args);
+    if (!p.waitForStarted(timeoutMs))
+        return QString();
+    p.closeWriteChannel();
+    if (!p.waitForFinished(timeoutMs))
+        return QString();
+    return QString::fromUtf8(p.readAllStandardOutput()).trimmed();
+}
+
+static QString detectPulseMonitorSource()
+{
+    const QString defaultSink = runCommandCaptureStdout("pactl", {"get-default-sink"});
+    if (!defaultSink.isEmpty())
+        return defaultSink + ".monitor";
+
+    const QString sourceLines = runCommandCaptureStdout("pactl", {"list", "short", "sources"});
+    const QStringList lines = sourceLines.split('\n', Qt::SkipEmptyParts);
+    for (const QString &line : lines) {
+        const QStringList parts = line.split('\t', Qt::SkipEmptyParts);
+        if (parts.size() >= 2 && parts[1].contains(".monitor"))
+            return parts[1].trimmed();
+    }
+    return QString();
 }
 
 static QString formatRoutineTargets(const QList<RoutineDeviceSetting> &settings)
@@ -226,11 +260,14 @@ MainWindow::MainWindow(QWidget *parent)
     presenceTimer = new QTimer(this);
     routineTimer = new QTimer(this);
     routineVerifyTimer = new QTimer(this);
+    audioReactiveTimer = new QTimer(this);
     routineVerifyTimer->setInterval(3000);
+    audioReactiveTimer->setInterval(audioReactiveIntervalMs);
 
     connect(presenceTimer, &QTimer::timeout, this, &MainWindow::checkPhonePresence);
     connect(routineTimer, &QTimer::timeout, this, &MainWindow::checkRoutines);
     connect(routineVerifyTimer, &QTimer::timeout, this, &MainWindow::processRoutineVerificationTick);
+    connect(audioReactiveTimer, &QTimer::timeout, this, &MainWindow::processAudioReactiveTick);
 
     presenceTimer->start(8000);     // unchanged
     routineTimer->start(60000);     // unchanged
@@ -243,6 +280,9 @@ MainWindow::MainWindow(QWidget *parent)
     }
 
     loadPresenceSettings();
+    if (audioReactiveTimer)
+        audioReactiveTimer->setInterval(audioReactiveIntervalMs);
+    ensureAudioReactiveRunning();
     loadRoutines();
     buildUI(); // Show baseline tabs immediately, then populate device data asynchronously.
     loadDevices();
@@ -312,8 +352,15 @@ void MainWindow::loadPresenceSettings()
 {
     presenceAutoOnAllGroups = true;
     presenceAutoOffAllGroups = false;
+    audioReactiveAllGroups = false;
+    audioReactiveIntervalMs = 100;
+    audioReactivePerDeviceMinMs = 7000;
+    audioReactiveGlobalMinMs = 500;
+    audioReactiveMaxCommandsPerTick = 1;
+    audioReactiveBrightnessDeadband = 2;
     presenceAutoOnGroupEnabled.clear();
     presenceAutoOffGroupEnabled.clear();
+    audioReactiveGroupEnabled.clear();
     groupTabSettings.clear();
 
     QFile f(findConfigFileForRead("Lights.json"));
@@ -352,6 +399,20 @@ void MainWindow::loadPresenceSettings()
             else if (offGroups.contains("ALL"))
                 presenceAutoOffAllGroups = offGroups.value("ALL").toBool(presenceAutoOffAllGroups);
 
+            audioReactiveAllGroups = root.value("audioReactiveAllGroups").toBool(false);
+            const QJsonObject audioGroups = root.value("audioReactiveGroups").toObject();
+            for (auto it = audioGroups.begin(); it != audioGroups.end(); ++it)
+                audioReactiveGroupEnabled[it.key()] = it.value().toBool(false);
+            if (audioGroups.contains("__all__"))
+                audioReactiveAllGroups = audioGroups.value("__all__").toBool(audioReactiveAllGroups);
+            else if (audioGroups.contains("ALL"))
+                audioReactiveAllGroups = audioGroups.value("ALL").toBool(audioReactiveAllGroups);
+            audioReactiveIntervalMs = qBound(1, root.value("audioReactiveIntervalMs").toInt(100), 5000);
+            audioReactivePerDeviceMinMs = qBound(100, root.value("audioReactivePerDeviceMinMs").toInt(7000), 60000);
+            audioReactiveGlobalMinMs = qBound(10, root.value("audioReactiveGlobalMinMs").toInt(500), 10000);
+            audioReactiveMaxCommandsPerTick = qBound(1, root.value("audioReactiveMaxCommandsPerTick").toInt(1), 20);
+            audioReactiveBrightnessDeadband = qBound(1, root.value("audioReactiveBrightnessDeadband").toInt(2), 25);
+
             const QJsonObject tabSettings = root.value("tabSettings").toObject();
             for (auto it = tabSettings.begin(); it != tabSettings.end(); ++it) {
                 const QJsonObject tab = it.value().toObject();
@@ -379,12 +440,17 @@ void MainWindow::savePresenceSettings() const
     QJsonObject offGroups;
     for (auto it = presenceAutoOffGroupEnabled.begin(); it != presenceAutoOffGroupEnabled.end(); ++it)
         offGroups[it.key()] = it.value();
+    QJsonObject audioGroups;
+    for (auto it = audioReactiveGroupEnabled.begin(); it != audioReactiveGroupEnabled.end(); ++it)
+        audioGroups[it.key()] = it.value();
 
     // Persist explicit values for ALL and each current tab/group so Lights.json reflects current UI state.
     onGroups["__all__"] = presenceAutoOnAllGroups;
     onGroups["ALL"] = presenceAutoOnAllGroups;
     offGroups["__all__"] = presenceAutoOffAllGroups;
     offGroups["ALL"] = presenceAutoOffAllGroups;
+    audioGroups["__all__"] = audioReactiveAllGroups;
+    audioGroups["ALL"] = audioReactiveAllGroups;
 
     QStringList groups;
     for (const QJsonValue &v : std::as_const(deviceList)) {
@@ -395,6 +461,7 @@ void MainWindow::savePresenceSettings() const
     for (const QString &group : std::as_const(groups)) {
         onGroups[group] = isPresenceAutoOnEnabled(group);
         offGroups[group] = isPresenceAutoOffEnabled(group);
+        audioGroups[group] = isAudioReactiveEnabled(group);
     }
 
     QJsonObject tabSettings;
@@ -420,6 +487,13 @@ void MainWindow::savePresenceSettings() const
     root["pingAutoOffAllGroups"] = presenceAutoOffAllGroups;
     root["pingAutoOnGroups"] = onGroups;
     root["pingAutoOffGroups"] = offGroups;
+    root["audioReactiveAllGroups"] = audioReactiveAllGroups;
+    root["audioReactiveGroups"] = audioGroups;
+    root["audioReactiveIntervalMs"] = qBound(1, audioReactiveIntervalMs, 5000);
+    root["audioReactivePerDeviceMinMs"] = qBound(100, audioReactivePerDeviceMinMs, 60000);
+    root["audioReactiveGlobalMinMs"] = qBound(10, audioReactiveGlobalMinMs, 10000);
+    root["audioReactiveMaxCommandsPerTick"] = qBound(1, audioReactiveMaxCommandsPerTick, 20);
+    root["audioReactiveBrightnessDeadband"] = qBound(1, audioReactiveBrightnessDeadband, 25);
     root["tabSettings"] = tabSettings;
 
     QSaveFile f(configDir + "/Lights.json");
@@ -449,6 +523,384 @@ bool MainWindow::isPresenceAutoOffEnabled(const QString &groupKey) const
     if (presenceAutoOffGroupEnabled.contains(groupKey))
         return presenceAutoOffGroupEnabled.value(groupKey);
     return presenceAutoOffAllGroups;
+}
+
+bool MainWindow::isAudioReactiveEnabled(const QString &groupKey) const
+{
+    if (groupKey == "__all__")
+        return audioReactiveAllGroups;
+    if (audioReactiveGroupEnabled.contains(groupKey))
+        return audioReactiveGroupEnabled.value(groupKey);
+    return audioReactiveAllGroups;
+}
+
+bool MainWindow::hasAnyAudioReactiveEnabled() const
+{
+    if (audioReactiveAllGroups)
+        return true;
+    for (auto it = audioReactiveGroupEnabled.begin(); it != audioReactiveGroupEnabled.end(); ++it) {
+        if (it.value())
+            return true;
+    }
+    return false;
+}
+
+void MainWindow::ensureAudioReactiveRunning()
+{
+    if (hasAnyAudioReactiveEnabled())
+        startAudioReactiveCapture();
+    else
+        stopAudioReactiveCapture();
+}
+
+void MainWindow::startAudioReactiveCapture()
+{
+    if ((audioSource && audioInputStream)
+        || (usePulseMonitorProcess && pulseMonitorProcess && pulseMonitorProcess->state() == QProcess::Running)) {
+        if (audioReactiveTimer && !audioReactiveTimer->isActive())
+            audioReactiveTimer->start();
+        return;
+    }
+
+    stopAudioReactiveCapture();
+
+    const QList<QAudioDevice> devices = QMediaDevices::audioInputs();
+    if (devices.isEmpty()) {
+        const QString monitorSource = detectPulseMonitorSource();
+        if (monitorSource.isEmpty()) {
+            addRoutineVerifyRecent("[PULSEAUDIO]",
+                                   "capture start failed: no Qt input devices and no Pulse monitor source");
+            return;
+        }
+
+        pulseMonitorProcess = new QProcess(this);
+        pulseMonitorProcess->setProcessChannelMode(QProcess::SeparateChannels);
+        const QStringList args = {
+            "--device", monitorSource,
+            "--format=s16le",
+            "--rate=48000",
+            "--channels=2",
+            "--latency-msec=20"
+        };
+        pulseMonitorProcess->start("parec", args);
+        if (!pulseMonitorProcess->waitForStarted(2000)) {
+            const QString err = QString::fromUtf8(pulseMonitorProcess->readAllStandardError()).trimmed();
+            addRoutineVerifyRecent("[PULSEAUDIO]",
+                                   QString("capture start failed via parec on '%1'%2")
+                                       .arg(monitorSource)
+                                       .arg(err.isEmpty() ? QString() : QString(" (%1)").arg(err)));
+            pulseMonitorProcess->deleteLater();
+            pulseMonitorProcess = nullptr;
+            return;
+        }
+
+        usePulseMonitorProcess = true;
+        pulseMonitorSource = monitorSource;
+        audioReactiveSmoothedLevel = 0.0;
+        audioReactiveLastBrightness.clear();
+        audioReactiveLastHeartbeatMs = 0;
+        addRoutineVerifyRecent("[PULSEAUDIO]",
+                               QString("capture started via parec: source='%1', interval=%2ms")
+                                   .arg(pulseMonitorSource)
+                                   .arg(audioReactiveTimer ? audioReactiveTimer->interval() : -1));
+        if (audioReactiveTimer && !audioReactiveTimer->isActive())
+            audioReactiveTimer->start();
+        return;
+    }
+
+    QAudioDevice selected;
+    for (const QAudioDevice &dev : devices) {
+        const QString desc = dev.description();
+        if (desc.contains("monitor", Qt::CaseInsensitive)
+            || desc.contains("loopback", Qt::CaseInsensitive)
+            || desc.contains("stereo mix", Qt::CaseInsensitive)
+            || desc.contains("what u hear", Qt::CaseInsensitive)) {
+            selected = dev;
+            break;
+        }
+    }
+    if (selected.isNull())
+        selected = QMediaDevices::defaultAudioInput();
+    if (selected.isNull())
+        selected = devices.first();
+
+    QAudioFormat format;
+    format.setSampleRate(48000);
+    format.setChannelCount(2);
+    format.setSampleFormat(QAudioFormat::Int16);
+    if (!selected.isFormatSupported(format))
+        format = selected.preferredFormat();
+
+    audioSource = new QAudioSource(selected, format, this);
+    audioInputStream = audioSource->start();
+    if (!audioInputStream) {
+        addRoutineVerifyRecent("[PULSEAUDIO]",
+                               QString("capture start failed on '%1'").arg(selected.description()));
+        stopAudioReactiveCapture();
+        return;
+    }
+
+    audioReactiveSmoothedLevel = 0.0;
+    audioReactiveNoiseFloor = 0.01;
+    audioReactivePeakLevel = 0.08;
+    audioReactiveLastBrightness.clear();
+    audioReactiveLastCommandMs.clear();
+    audioReactiveDispatchOffset = 0;
+    audioReactiveLastGlobalCommandMs = 0;
+    audioReactiveLastHeartbeatMs = 0;
+    addRoutineVerifyRecent("[PULSEAUDIO]",
+                           QString("capture started: device='%1', interval=%2ms")
+                               .arg(selected.description())
+                               .arg(audioReactiveTimer ? audioReactiveTimer->interval() : -1));
+    if (audioReactiveTimer && !audioReactiveTimer->isActive())
+        audioReactiveTimer->start();
+}
+
+void MainWindow::stopAudioReactiveCapture()
+{
+    if (audioReactiveTimer && audioReactiveTimer->isActive())
+        audioReactiveTimer->stop();
+    if (pulseMonitorProcess) {
+        if (pulseMonitorProcess->state() != QProcess::NotRunning) {
+            pulseMonitorProcess->terminate();
+            if (!pulseMonitorProcess->waitForFinished(500))
+                pulseMonitorProcess->kill();
+        }
+        pulseMonitorProcess->deleteLater();
+        pulseMonitorProcess = nullptr;
+    }
+    if (audioSource) {
+        audioSource->stop();
+        audioSource->deleteLater();
+        audioSource = nullptr;
+    }
+    audioInputStream = nullptr;
+    usePulseMonitorProcess = false;
+    pulseMonitorSource.clear();
+    audioReactiveSmoothedLevel = 0.0;
+    audioReactiveNoiseFloor = 0.01;
+    audioReactivePeakLevel = 0.08;
+    audioReactiveLastBrightness.clear();
+    audioReactiveLastCommandMs.clear();
+    audioReactiveDispatchOffset = 0;
+    audioReactiveLastGlobalCommandMs = 0;
+    audioReactiveLastDiagnosticsMs = 0;
+    audioReactiveLastHeartbeatMs = 0;
+}
+
+void MainWindow::processAudioReactiveTick()
+{
+    if (!hasAnyAudioReactiveEnabled()) {
+        stopAudioReactiveCapture();
+        return;
+    }
+    QByteArray data;
+    int channels = 2;
+    int bytesPerSample = 2;
+    QAudioFormat::SampleFormat sampleFormat = QAudioFormat::Int16;
+
+    if (usePulseMonitorProcess) {
+        if (!pulseMonitorProcess || pulseMonitorProcess->state() != QProcess::Running)
+            return;
+        data = pulseMonitorProcess->readAllStandardOutput();
+    } else {
+        if (!audioSource || !audioInputStream)
+            return;
+        data = audioInputStream->readAll();
+        const QAudioFormat format = audioSource->format();
+        channels = qMax(1, format.channelCount());
+        sampleFormat = format.sampleFormat();
+        switch (sampleFormat) {
+        case QAudioFormat::UInt8:
+            bytesPerSample = 1;
+            break;
+        case QAudioFormat::Int16:
+            bytesPerSample = 2;
+            break;
+        case QAudioFormat::Int32:
+        case QAudioFormat::Float:
+            bytesPerSample = 4;
+            break;
+        default:
+            return;
+        }
+    }
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (data.isEmpty()) {
+        if ((nowMs - audioReactiveLastHeartbeatMs) >= 1500) {
+            addRoutineVerifyRecent("[PULSEAUDIO]",
+                                   usePulseMonitorProcess
+                                       ? QString("tick: no audio data from source '%1'").arg(pulseMonitorSource)
+                                       : "tick: no audio data available");
+            audioReactiveLastHeartbeatMs = nowMs;
+        }
+        return;
+    }
+
+    const int frameBytes = bytesPerSample * channels;
+    if (frameBytes <= 0 || data.size() < frameBytes)
+        return;
+
+    const int frames = data.size() / frameBytes;
+    if (frames <= 0)
+        return;
+
+    const char *ptr = data.constData();
+    double sumSquares = 0.0;
+    int sampleCount = 0;
+    for (int i = 0; i < frames * channels; ++i) {
+        double sample = 0.0;
+        switch (sampleFormat) {
+        case QAudioFormat::UInt8:
+            sample = (static_cast<unsigned char>(ptr[i]) - 128.0) / 128.0;
+            break;
+        case QAudioFormat::Int16: {
+            qint16 v = 0;
+            std::memcpy(&v, ptr + (i * bytesPerSample), sizeof(v));
+            sample = static_cast<double>(v) / 32768.0;
+            break;
+        }
+        case QAudioFormat::Int32: {
+            qint32 v = 0;
+            std::memcpy(&v, ptr + (i * bytesPerSample), sizeof(v));
+            sample = static_cast<double>(v) / 2147483648.0;
+            break;
+        }
+        case QAudioFormat::Float: {
+            float v = 0.0f;
+            std::memcpy(&v, ptr + (i * bytesPerSample), sizeof(v));
+            sample = qBound(-1.0, static_cast<double>(v), 1.0);
+            break;
+        }
+        default:
+            break;
+        }
+        sumSquares += sample * sample;
+        sampleCount++;
+    }
+    if (sampleCount == 0)
+        return;
+
+    const double rms = std::sqrt(sumSquares / static_cast<double>(sampleCount));
+
+    // Adaptive dynamic range tracking: follow quiet/loud envelope to react to song changes.
+    if (rms < audioReactiveNoiseFloor)
+        audioReactiveNoiseFloor = (audioReactiveNoiseFloor * 0.92) + (rms * 0.08);
+    else
+        audioReactiveNoiseFloor = (audioReactiveNoiseFloor * 0.998) + (rms * 0.002);
+
+    if (rms > audioReactivePeakLevel)
+        audioReactivePeakLevel = (audioReactivePeakLevel * 0.85) + (rms * 0.15);
+    else
+        audioReactivePeakLevel = (audioReactivePeakLevel * 0.997) + (rms * 0.003);
+
+    if (audioReactivePeakLevel < audioReactiveNoiseFloor + 0.01)
+        audioReactivePeakLevel = audioReactiveNoiseFloor + 0.01;
+
+    const double dynamicRange = qMax(0.01, audioReactivePeakLevel - audioReactiveNoiseFloor);
+    const double normalized = qBound(0.0, (rms - audioReactiveNoiseFloor) / dynamicRange, 1.0);
+    const double curved = std::pow(normalized, 0.70);
+
+    // Faster attack/release than previous smoothing so verse/chorus changes are visible.
+    audioReactiveSmoothedLevel = (audioReactiveSmoothedLevel * 0.55) + (curved * 0.45);
+    const double factor = 0.03 + (0.97 * audioReactiveSmoothedLevel);
+
+    struct PendingBrightness {
+        QString mac;
+        QString sku;
+        int target = 1;
+    };
+
+    QVector<PendingBrightness> pending;
+    int changedDevices = 0;
+    int eligibleDevices = 0;
+    int minTarget = 100;
+    int maxTarget = 1;
+    int sentMinTarget = 100;
+    int sentMaxTarget = 1;
+    for (const QJsonValue &v : std::as_const(deviceList)) {
+        const QJsonObject dev = v.toObject();
+        const QString room = roomForDevice(dev);
+        if (!isAudioReactiveEnabled(room))
+            continue;
+
+        const QString mac = dev.value("device").toString();
+        if (!isDeviceOn(mac))
+            continue;
+        eligibleDevices++;
+
+        const QString sku = dev.value("sku").toString();
+        const int base = qBound(1, effectiveGroupTabSetting(room).brightness, 100);
+        const int target = qBound(1, static_cast<int>(std::lround(base * factor)), 100);
+        const int previous = audioReactiveLastBrightness.value(mac, -1);
+        if (previous >= 0 && qAbs(previous - target) < qBound(1, audioReactiveBrightnessDeadband, 25))
+            continue;
+
+        PendingBrightness p;
+        p.mac = mac;
+        p.sku = sku;
+        p.target = target;
+        pending.push_back(p);
+        minTarget = qMin(minTarget, target);
+        maxTarget = qMax(maxTarget, target);
+    }
+
+    // Safety dispatcher: keep audio-reactive updates responsive without flooding cloud API.
+    const qint64 kPerDeviceMinMs = qBound(100, audioReactivePerDeviceMinMs, 60000);
+    const qint64 kGlobalMinMs = qBound(10, audioReactiveGlobalMinMs, 10000);
+    const int kMaxCommandsPerTick = qBound(1, audioReactiveMaxCommandsPerTick, 20);
+
+    if (!pending.isEmpty()) {
+        if (audioReactiveDispatchOffset >= pending.size())
+            audioReactiveDispatchOffset = 0;
+
+        int sentThisTick = 0;
+        for (int i = 0; i < pending.size() && sentThisTick < kMaxCommandsPerTick; ++i) {
+            const int idx = (audioReactiveDispatchOffset + i) % pending.size();
+            const PendingBrightness &p = pending[idx];
+            const qint64 lastPerDevice = audioReactiveLastCommandMs.value(p.mac, 0);
+            if ((nowMs - lastPerDevice) < kPerDeviceMinMs)
+                continue;
+            if ((nowMs - audioReactiveLastGlobalCommandMs) < kGlobalMinMs)
+                continue;
+
+            sendCommand(p.mac, p.sku, "devices.capabilities.range", "brightness", p.target);
+            audioReactiveLastBrightness[p.mac] = p.target;
+            audioReactiveLastCommandMs[p.mac] = nowMs;
+            audioReactiveLastGlobalCommandMs = nowMs;
+            changedDevices++;
+            sentMinTarget = qMin(sentMinTarget, p.target);
+            sentMaxTarget = qMax(sentMaxTarget, p.target);
+            sentThisTick++;
+        }
+
+        audioReactiveDispatchOffset = (audioReactiveDispatchOffset + 1) % pending.size();
+    }
+
+    if (changedDevices > 0) {
+        if ((nowMs - audioReactiveLastDiagnosticsMs) >= 1200) {
+            addRoutineVerifyRecent("[PULSEAUDIO]",
+                                   QString("rms=%1 norm=%2 level=%3 -> adjusted %4 device(s), brightness %5-%6")
+                                       .arg(QString::number(rms, 'f', 3))
+                                       .arg(QString::number(normalized, 'f', 3))
+                                       .arg(QString::number(audioReactiveSmoothedLevel, 'f', 3))
+                                       .arg(changedDevices)
+                                       .arg(sentMinTarget)
+                                       .arg(sentMaxTarget));
+            audioReactiveLastDiagnosticsMs = nowMs;
+        }
+    } else if ((nowMs - audioReactiveLastHeartbeatMs) >= 1500) {
+        addRoutineVerifyRecent("[PULSEAUDIO]",
+                               QString("tick: rms=%1 norm=%2 level=%3 floor=%4 peak=%5 eligible=%6, no brightness changes")
+                                   .arg(QString::number(rms, 'f', 3))
+                                   .arg(QString::number(normalized, 'f', 3))
+                                   .arg(QString::number(audioReactiveSmoothedLevel, 'f', 3))
+                                   .arg(QString::number(audioReactiveNoiseFloor, 'f', 3))
+                                   .arg(QString::number(audioReactivePeakLevel, 'f', 3))
+                                   .arg(eligibleDevices));
+        audioReactiveLastHeartbeatMs = nowMs;
+    }
 }
 
 void MainWindow::loadRoutines()
@@ -701,6 +1153,21 @@ void MainWindow::sendCommand(const QString &device, const QString &sku,
                              const QString &type, const QString &instance,
                              const QVariant &value)
 {
+    const QString bulb = lightLabelForMac(device);
+    QString valueText;
+    if (value.typeId() == QMetaType::Bool)
+        valueText = value.toBool() ? "true" : "false";
+    else
+        valueText = value.toString();
+
+    addRoutineVerifyRecent("[COMMAND]",
+                           QString("%1 -> %2=%3 -> %4/%5 -> queued")
+                               .arg(bulb)
+                               .arg(instance)
+                               .arg(valueText)
+                               .arg(type)
+                               .arg(sku));
+
     QJsonObject cap{
         {"type", type},
         {"instance", instance},
@@ -722,7 +1189,37 @@ void MainWindow::sendCommand(const QString &device, const QString &sku,
     req.setRawHeader("Govee-API-Key", apiKey.toUtf8());
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
 
-    nam->post(req, QJsonDocument(root).toJson());
+    QNetworkReply *reply = nam->post(req, QJsonDocument(root).toJson());
+    connect(reply, &QNetworkReply::finished, this, [this, reply, bulb, instance, valueText]() {
+        const QString payload = QString("%1=%2").arg(instance, valueText);
+        if (reply->error() != QNetworkReply::NoError) {
+            addRoutineVerifyRecent("[COMMAND]",
+                                   QString("%1 -> %2 -> failed (%3)")
+                                       .arg(bulb)
+                                       .arg(payload)
+                                       .arg(reply->errorString()));
+            reply->deleteLater();
+            return;
+        }
+
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        const QJsonObject root = doc.object();
+        const int code = root.contains("code") ? root.value("code").toInt(-1) : 200;
+        if (code != 200) {
+            addRoutineVerifyRecent("[COMMAND]",
+                                   QString("%1 -> %2 -> API code %3 (%4)")
+                                       .arg(bulb)
+                                       .arg(payload)
+                                       .arg(code)
+                                       .arg(root.value("message").toString()));
+        } else {
+            addRoutineVerifyRecent("[COMMAND]",
+                                   QString("%1 -> %2 -> sent")
+                                       .arg(bulb)
+                                       .arg(payload));
+        }
+        reply->deleteLater();
+    });
 }
 
 // ==========================================================================
@@ -755,6 +1252,7 @@ QWidget* MainWindow::createLightWidget(const QJsonObject &dev)
     QString name = dev["deviceName"].toString("Light");
     QString mac  = dev["device"].toString();
     QString sku  = dev["sku"].toString();
+    const QString groupKey = roomForDevice(dev);
 
     bool isOn = false;
     int bri = 100, temp = 4000;
@@ -793,6 +1291,13 @@ QWidget* MainWindow::createLightWidget(const QJsonObject &dev)
         power->setText(on ? "Turn Off" : "Turn On");
         sendCommand(mac, sku, "devices.capabilities.on_off", "powerSwitch", on ? 1 : 0);
         setDevicePowerState(mac, on);
+        if (on)
+            applyGroupTabSettingToDevice(mac, sku, groupKey);
+        addRoutineVerifyRecent("[MANUAL]",
+                               QString("%1 -> power=%2 -> group=%3 -> command sent")
+                                   .arg(name)
+                                   .arg(on ? "on" : "off")
+                                   .arg(groupKey));
         refreshPowerButtons();
     });
     l->addWidget(power);
@@ -846,6 +1351,9 @@ QWidget* MainWindow::createGroupControl(const QVector<QJsonObject> &devices, con
     QVBoxLayout *l = new QVBoxLayout(box);
     GroupTabSetting tabSetting = groupTabSettings.value(groupKey, GroupTabSetting{});
 
+    QGroupBox *automationFrame = new QGroupBox("Automation");
+    QVBoxLayout *automationLayout = new QVBoxLayout(automationFrame);
+
     QCheckBox *autoOnWhenPingable = new QCheckBox(QString("Turn ON when %1 is pingable").arg(phoneHost));
     autoOnWhenPingable->setChecked(isPresenceAutoOnEnabled(groupKey));
     connect(autoOnWhenPingable, &QCheckBox::toggled, this, [this, groupKey](bool enabled) {
@@ -855,7 +1363,7 @@ QWidget* MainWindow::createGroupControl(const QVector<QJsonObject> &devices, con
             presenceAutoOnGroupEnabled[groupKey] = enabled;
         savePresenceSettings();
     });
-    l->addWidget(autoOnWhenPingable);
+    automationLayout->addWidget(autoOnWhenPingable);
 
     QCheckBox *autoOffWhenNotPingable = new QCheckBox(QString("Turn OFF when %1 is NOT pingable").arg(phoneHost));
     autoOffWhenNotPingable->setChecked(isPresenceAutoOffEnabled(groupKey));
@@ -866,7 +1374,25 @@ QWidget* MainWindow::createGroupControl(const QVector<QJsonObject> &devices, con
             presenceAutoOffGroupEnabled[groupKey] = enabled;
         savePresenceSettings();
     });
-    l->addWidget(autoOffWhenNotPingable);
+    automationLayout->addWidget(autoOffWhenNotPingable);
+
+    QCheckBox *audioReactiveOverride = new QCheckBox("Pulse Audio Override");
+    audioReactiveOverride->setChecked(isAudioReactiveEnabled(groupKey));
+    connect(audioReactiveOverride, &QCheckBox::toggled, this, [this, groupKey](bool enabled) {
+        if (groupKey == "__all__")
+            audioReactiveAllGroups = enabled;
+        else
+            audioReactiveGroupEnabled[groupKey] = enabled;
+        savePresenceSettings();
+        ensureAudioReactiveRunning();
+    });
+    automationLayout->addWidget(audioReactiveOverride);
+
+    QLabel *audioHint = new QLabel("Keeps color/temp scheme and adjusts only brightness from Pulse audio loudness.");
+    audioHint->setWordWrap(true);
+    automationLayout->addWidget(audioHint);
+
+    l->addWidget(automationFrame);
 
     bool groupIsOn = false;
     for (const QJsonObject &d : devices) {
@@ -897,10 +1423,19 @@ QWidget* MainWindow::createGroupControl(const QVector<QJsonObject> &devices, con
     connect(groupPower, &QPushButton::toggled, this, [=](bool on){
         groupPower->setText(on ? "Turn Group Off" : "Turn Group On");
         for (const auto &d : devices) {
-            sendCommand(d["device"].toString(), d["sku"].toString(),
+            const QString mac = d["device"].toString();
+            const QString sku = d["sku"].toString();
+            sendCommand(mac, sku,
                         "devices.capabilities.on_off", "powerSwitch", on ? 1 : 0);
-            setDevicePowerState(d["device"].toString(), on);
+            setDevicePowerState(mac, on);
+            if (on)
+                applyGroupTabSettingToDevice(mac, sku, groupKey);
         }
+        addRoutineVerifyRecent("[MANUAL]",
+                               QString("%1 -> power=%2 -> devices=%3 -> command sent")
+                                   .arg(groupKey == "__all__" ? "ALL LIGHTS" : groupKey)
+                                   .arg(on ? "on" : "off")
+                                   .arg(devices.size()));
         refreshPowerButtons();
     });
     l->addWidget(groupPower);
@@ -1363,7 +1898,9 @@ void MainWindow::refreshRoutineVerifyDiagnostics()
         const QString status = routineVerifyInFlight.contains(mac)
                                    ? QString("not verified (checking, retries=%1)").arg(t.retriesRemaining)
                                    : QString("not verified (retries=%1)").arg(t.retriesRemaining);
-        routineVerifyList->addItem(QString("%1 -> %2 -> %3 -> %4")
+        const QString sourceTag = t.sourceTag.trimmed().isEmpty() ? QString("[MANUAL]") : t.sourceTag;
+        routineVerifyList->addItem(QString("%1 %2 -> %3 -> %4 -> %5")
+                                       .arg(sourceTag)
                                        .arg(lightLabelForMac(mac))
                                        .arg(currentStateText(t))
                                        .arg(expectedStateText(t))
@@ -1391,14 +1928,17 @@ QString MainWindow::lightLabelForMac(const QString &mac) const
     return mac;
 }
 
-void MainWindow::addRoutineVerifyRecent(const QString &entry)
+void MainWindow::addRoutineVerifyRecent(const QString &sourceTag, const QString &entry)
 {
-    const QString line = QString("[%1] %2")
+    const QString tag = sourceTag.trimmed().isEmpty() ? QString("[MANUAL]") : sourceTag;
+    const QString line = QString("[%1] %2 %3")
                              .arg(QTime::currentTime().toString("HH:mm:ss"))
+                             .arg(tag)
                              .arg(entry);
     routineVerifyRecentEntries.prepend(line);
-    while (routineVerifyRecentEntries.size() > 40)
+    while (routineVerifyRecentEntries.size() > 500)
         routineVerifyRecentEntries.removeLast();
+    refreshRoutineVerifyDiagnostics();
 }
 
 // ==========================================================================
@@ -1410,6 +1950,7 @@ void MainWindow::checkRoutines()
     struct DeferredSetting {
         QString mac;
         QString sku;
+        QString sourceTag = "[MANUAL]";
         bool usePower = false;
         int power = 1;
         bool useBrightness = false;
@@ -1422,6 +1963,7 @@ void MainWindow::checkRoutines()
 
     QList<DeferredSetting> deferred;
     QMap<QString, DeferredSetting> desiredFinal;
+    QStringList triggeredRoutineNames;
 
     const QDate today = QDate::currentDate();
     const int day = today.dayOfWeek();
@@ -1434,6 +1976,8 @@ void MainWindow::checkRoutines()
         if (r.phoneCondition == 2 && phoneWasOnline) continue;
         if (r.time.hour()==now.hour() && r.time.minute()==now.minute()) {
             routineExecuted = true;
+            if (!triggeredRoutineNames.contains(r.name))
+                triggeredRoutineNames << r.name;
             qDebug() << "Executing routine:" << r.name;
             for (const RoutineDeviceSetting &s : r.settings) {
                 for (const QJsonValue &v : std::as_const(deviceList)) {
@@ -1447,6 +1991,7 @@ void MainWindow::checkRoutines()
                     DeferredSetting &final = desiredFinal[mac];
                     final.mac = mac;
                     final.sku = sku;
+                    final.sourceTag = QString("[ROUTINE:%1]").arg(r.name);
                     if (s.usePower) {
                         final.usePower = true;
                         final.power = (s.power != 0) ? 1 : 0;
@@ -1534,7 +2079,8 @@ void MainWindow::checkRoutines()
                                            d.usePower, d.power,
                                            d.useBrightness, d.brightness,
                                            d.useTemp, d.temperature,
-                                           d.useColor, d.color);
+                                           d.useColor, d.color,
+                                           d.sourceTag);
             }
             processRoutineVerificationTick();
             if (!routineVerifyTargets.isEmpty() && routineVerifyTimer && !routineVerifyTimer->isActive())
@@ -1543,6 +2089,15 @@ void MainWindow::checkRoutines()
     }
 
     if (routineExecuted) {
+        if (!triggeredRoutineNames.isEmpty()) {
+            QMessageBox *popup = new QMessageBox(QMessageBox::Information,
+                                                 "Routine Triggered",
+                                                 QString("Triggered routine(s): %1").arg(triggeredRoutineNames.join(", ")),
+                                                 QMessageBox::Ok,
+                                                 this);
+            popup->setAttribute(Qt::WA_DeleteOnClose);
+            popup->show();
+        }
         refreshPowerButtons();
         // Pull fresh device state shortly after routine commands so UI text matches real hardware state.
         QTimer::singleShot(1500, this, &MainWindow::refreshDevices);
@@ -1553,7 +2108,8 @@ void MainWindow::enqueueRoutineVerification(const QString &mac, const QString &s
                                             bool expectPower, int power,
                                             bool expectBrightness, int brightness,
                                             bool expectTemp, int temperature,
-                                            bool expectColor, const QColor &color)
+                                            bool expectColor, const QColor &color,
+                                            const QString &sourceTag)
 {
     if (mac.isEmpty() || sku.isEmpty())
         return;
@@ -1561,6 +2117,7 @@ void MainWindow::enqueueRoutineVerification(const QString &mac, const QString &s
     RoutineVerifyTarget target;
     target.mac = mac;
     target.sku = sku;
+    target.sourceTag = sourceTag.trimmed().isEmpty() ? QString("[MANUAL]") : sourceTag.trimmed();
     target.expectPower = expectPower;
     target.power = (power != 0) ? 1 : 0;
     target.expectBrightness = expectBrightness;
@@ -1580,6 +2137,7 @@ void MainWindow::enqueueRoutineVerification(const QString &mac, const QString &s
     if (routineVerifyTargets.contains(mac)) {
         RoutineVerifyTarget merged = routineVerifyTargets.value(mac);
         merged.sku = target.sku;
+        merged.sourceTag = target.sourceTag;
         if (target.expectPower) {
             merged.expectPower = true;
             merged.power = target.power;
@@ -1640,7 +2198,7 @@ void MainWindow::verifyRoutineTargetNow(const QString &mac)
 
     const RoutineVerifyTarget target = routineVerifyTargets.value(mac);
     if (target.mac.isEmpty() || target.sku.isEmpty()) {
-        addRoutineVerifyRecent(QString("%1 -> unknown -> unknown -> not verified")
+        addRoutineVerifyRecent(target.sourceTag, QString("%1 -> unknown -> unknown -> not verified")
                                    .arg(lightLabelForMac(target.mac)));
         routineVerifyTargets.remove(mac);
         return;
@@ -1676,11 +2234,11 @@ void MainWindow::verifyRoutineTargetNow(const QString &mac)
         if (reply->error() != QNetworkReply::NoError) {
             current.retriesRemaining--;
             if (current.retriesRemaining <= 0) {
-                addRoutineVerifyRecent(QString("%1 -> unknown -> unknown -> not verified")
+                addRoutineVerifyRecent(current.sourceTag, QString("%1 -> unknown -> unknown -> not verified")
                                            .arg(lightLabelForMac(current.mac)));
                 routineVerifyTargets.remove(mac);
             } else {
-                addRoutineVerifyRecent(QString("%1 -> unknown -> unknown -> not verified")
+                addRoutineVerifyRecent(current.sourceTag, QString("%1 -> unknown -> unknown -> not verified")
                                            .arg(lightLabelForMac(current.mac)));
                 routineVerifyTargets[mac] = current;
             }
@@ -1693,11 +2251,11 @@ void MainWindow::verifyRoutineTargetNow(const QString &mac)
         if (rootObj.value("code").toInt(-1) != 200) {
             current.retriesRemaining--;
             if (current.retriesRemaining <= 0) {
-                addRoutineVerifyRecent(QString("%1 -> unknown -> unknown -> not verified")
+                addRoutineVerifyRecent(current.sourceTag, QString("%1 -> unknown -> unknown -> not verified")
                                            .arg(lightLabelForMac(current.mac)));
                 routineVerifyTargets.remove(mac);
             } else {
-                addRoutineVerifyRecent(QString("%1 -> unknown -> unknown -> not verified")
+                addRoutineVerifyRecent(current.sourceTag, QString("%1 -> unknown -> unknown -> not verified")
                                            .arg(lightLabelForMac(current.mac)));
                 routineVerifyTargets[mac] = current;
             }
@@ -1757,7 +2315,7 @@ void MainWindow::verifyRoutineTargetNow(const QString &mac)
             else if (current.hasObservedTemp) cur << QString("temp=%1K").arg(current.observedTemp);
             QStringList exp;
             if (current.expectPower) exp << QString("power=%1").arg(current.power ? "on" : "off");
-            addRoutineVerifyRecent(QString("%1 -> %2 -> %3 -> verified")
+            addRoutineVerifyRecent(current.sourceTag, QString("%1 -> %2 -> %3 -> verified")
                                        .arg(lightLabelForMac(current.mac))
                                        .arg(cur.isEmpty() ? "unknown" : cur.join(", "))
                                        .arg(exp.isEmpty() ? "none" : exp.join(", ")));
@@ -1783,7 +2341,7 @@ void MainWindow::verifyRoutineTargetNow(const QString &mac)
             if (current.expectBrightness) exp << QString("brightness=%1").arg(current.brightness);
             if (current.expectColor) exp << QString("color=%1").arg(current.color.name(QColor::HexRgb).toUpper());
             else if (current.expectTemp) exp << QString("temp=%1K").arg(current.temperature);
-            addRoutineVerifyRecent(QString("%1 -> %2 -> %3 -> verified")
+            addRoutineVerifyRecent(current.sourceTag, QString("%1 -> %2 -> %3 -> verified")
                                        .arg(lightLabelForMac(current.mac))
                                        .arg(cur.isEmpty() ? "unknown" : cur.join(", "))
                                        .arg(exp.isEmpty() ? "none" : exp.join(", ")));
@@ -1815,13 +2373,13 @@ void MainWindow::verifyRoutineTargetNow(const QString &mac)
             if (current.expectBrightness) exp << QString("brightness=%1").arg(current.brightness);
             if (current.expectColor) exp << QString("color=%1").arg(current.color.name(QColor::HexRgb).toUpper());
             else if (current.expectTemp) exp << QString("temp=%1K").arg(current.temperature);
-            addRoutineVerifyRecent(QString("%1 -> %2 -> %3 -> not verified")
+            addRoutineVerifyRecent(current.sourceTag, QString("%1 -> %2 -> %3 -> not verified")
                                        .arg(lightLabelForMac(current.mac))
                                        .arg(cur.isEmpty() ? "unknown" : cur.join(", "))
                                        .arg(exp.isEmpty() ? "none" : exp.join(", ")));
             routineVerifyTargets.remove(mac);
         } else {
-            addRoutineVerifyRecent(QString("%1 -> %2 -> %3 -> not verified")
+            addRoutineVerifyRecent(current.sourceTag, QString("%1 -> %2 -> %3 -> not verified")
                                        .arg(lightLabelForMac(current.mac))
                                        .arg(current.hasObservedPower ? QString("power=%1").arg(current.observedPowerOn ? "on" : "off") : "unknown")
                                        .arg(current.expectPower ? QString("power=%1").arg(current.power ? "on" : "off") : "unknown"));
@@ -1850,7 +2408,7 @@ QWidget* MainWindow::createConfigTab()
 
     l->addWidget(new QLabel("<h2>Config</h2>"));
 
-    QLabel *hint = new QLabel("Set the device/phone host used for ping-based presence checks.");
+    QLabel *hint = new QLabel("Set ping host and audio reactive safety/rate settings.");
     hint->setWordWrap(true);
     l->addWidget(hint);
 
@@ -1858,17 +2416,51 @@ QWidget* MainWindow::createConfigTab()
     QLineEdit *hostEdit = new QLineEdit(phoneHost);
     hostEdit->setPlaceholderText("192.168.42.2");
     form->addRow("Ping Host/IP:", hostEdit);
+    QSpinBox *audioIntervalEdit = new QSpinBox;
+    audioIntervalEdit->setRange(1, 5000);
+    audioIntervalEdit->setValue(qBound(1, audioReactiveIntervalMs, 5000));
+    audioIntervalEdit->setSuffix(" ms");
+    form->addRow("Audio Reactive Interval:", audioIntervalEdit);
+    QSpinBox *audioPerDeviceMinEdit = new QSpinBox;
+    audioPerDeviceMinEdit->setRange(100, 60000);
+    audioPerDeviceMinEdit->setValue(qBound(100, audioReactivePerDeviceMinMs, 60000));
+    audioPerDeviceMinEdit->setSuffix(" ms");
+    form->addRow("Per-Device Min Gap:", audioPerDeviceMinEdit);
+    QSpinBox *audioGlobalMinEdit = new QSpinBox;
+    audioGlobalMinEdit->setRange(10, 10000);
+    audioGlobalMinEdit->setValue(qBound(10, audioReactiveGlobalMinMs, 10000));
+    audioGlobalMinEdit->setSuffix(" ms");
+    form->addRow("Global Min Gap:", audioGlobalMinEdit);
+    QSpinBox *audioMaxPerTickEdit = new QSpinBox;
+    audioMaxPerTickEdit->setRange(1, 20);
+    audioMaxPerTickEdit->setValue(qBound(1, audioReactiveMaxCommandsPerTick, 20));
+    form->addRow("Max Commands/Tick:", audioMaxPerTickEdit);
+    QSpinBox *audioDeadbandEdit = new QSpinBox;
+    audioDeadbandEdit->setRange(1, 25);
+    audioDeadbandEdit->setValue(qBound(1, audioReactiveBrightnessDeadband, 25));
+    form->addRow("Brightness Deadband:", audioDeadbandEdit);
     l->addLayout(form);
+
+    QLabel *rateHint = new QLabel("Recommended for Govee cloud API: Per-Device Min Gap >= 6000 ms (10 commands/minute limit per device).");
+    rateHint->setWordWrap(true);
+    l->addWidget(rateHint);
 
     QPushButton *save = new QPushButton("Save Config");
     save->setMinimumHeight(40);
-    connect(save, &QPushButton::clicked, this, [this, hostEdit]() {
+    connect(save, &QPushButton::clicked, this, [this, hostEdit, audioIntervalEdit, audioPerDeviceMinEdit, audioGlobalMinEdit, audioMaxPerTickEdit, audioDeadbandEdit]() {
         const QString newHost = hostEdit->text().trimmed();
         if (newHost.isEmpty()) {
             QMessageBox::warning(this, "Config", "Ping host/IP cannot be empty.");
             return;
         }
         phoneHost = newHost;
+        audioReactiveIntervalMs = qBound(1, audioIntervalEdit->value(), 5000);
+        audioReactivePerDeviceMinMs = qBound(100, audioPerDeviceMinEdit->value(), 60000);
+        audioReactiveGlobalMinMs = qBound(10, audioGlobalMinEdit->value(), 10000);
+        audioReactiveMaxCommandsPerTick = qBound(1, audioMaxPerTickEdit->value(), 20);
+        audioReactiveBrightnessDeadband = qBound(1, audioDeadbandEdit->value(), 25);
+        if (audioReactiveTimer)
+            audioReactiveTimer->setInterval(audioReactiveIntervalMs);
         savePresenceSettings(); // Stored in Lights.json (main settings file).
         buildUI(); // Rebuild labels that show the host value.
     });
@@ -1908,16 +2500,23 @@ void MainWindow::checkPhonePresence()
 
                 phoneWasOnline = nowOnline;
                 qDebug() << (nowOnline ? "Phone HOME" : "Phone AWAY");
+                addRoutineVerifyRecent("[PING]",
+                                       QString("%1 -> ping=%2 -> host=%3 -> state changed")
+                                           .arg("Presence")
+                                           .arg(nowOnline ? "online" : "offline")
+                                           .arg(phoneHost));
 
                 bool changed = false;
+                int affectedDevices = 0;
                 for (const QJsonValue &v : std::as_const(deviceList)) {
                     const QJsonObject dev = v.toObject();
                     const QString mac = dev["device"].toString();
+                    const QString name = dev["deviceName"].toString(mac).trimmed();
                     const QString room = roomForDevice(dev);
-                    // Online behavior is controlled by per-room tabs only.
-                    // Offline behavior supports a global ALL LIGHTS override.
+                    // Online/offline behavior supports a global ALL LIGHTS override plus per-room toggles.
                     const bool shouldApply = nowOnline
-                                             ? presenceAutoOnGroupEnabled.value(room, false)
+                                             ? (presenceAutoOnAllGroups
+                                                || presenceAutoOnGroupEnabled.value(room, false))
                                              : (presenceAutoOffAllGroups
                                                 || presenceAutoOffGroupEnabled.value(room, false));
                     if (!shouldApply) continue;
@@ -1927,9 +2526,27 @@ void MainWindow::checkPhonePresence()
                                 "devices.capabilities.on_off", "powerSwitch",
                                 nowOnline ? 1 : 0);
                     setDevicePowerState(mac, nowOnline);
+                    if (nowOnline)
+                        applyGroupTabSettingToDevice(mac, dev["sku"].toString(), room);
                     changed = true;
+                    affectedDevices++;
+                    addRoutineVerifyRecent("[PING]",
+                                           QString("%1 -> power=%2 -> group=%3 -> command sent")
+                                               .arg(name)
+                                               .arg(nowOnline ? "on" : "off")
+                                               .arg(room));
                 }
-                if (changed) refreshPowerButtons();
+                if (changed) {
+                    addRoutineVerifyRecent("[PING]",
+                                           QString("Presence -> applied to %1 device(s) -> host=%2 -> done")
+                                               .arg(affectedDevices)
+                                               .arg(phoneHost));
+                    refreshPowerButtons();
+                } else {
+                    addRoutineVerifyRecent("[PING]",
+                                           QString("Presence -> no eligible device changes -> host=%1")
+                                               .arg(phoneHost));
+                }
             },
             Qt::SingleShotConnection);
 
@@ -2076,6 +2693,37 @@ void MainWindow::setDevicePowerState(const QString &mac, bool on)
     }
 
     deviceStates[mac] = caps;
+}
+
+GroupTabSetting MainWindow::effectiveGroupTabSetting(const QString &groupKey) const
+{
+    if (groupTabSettings.contains(groupKey))
+        return groupTabSettings.value(groupKey);
+    return groupTabSettings.value("__all__", GroupTabSetting{});
+}
+
+void MainWindow::applyGroupTabSettingToDevice(const QString &mac, const QString &sku, const QString &groupKey)
+{
+    if (mac.isEmpty() || sku.isEmpty())
+        return;
+
+    const GroupTabSetting tab = effectiveGroupTabSetting(groupKey);
+    const int brightness = qBound(1, tab.brightness, 100);
+    const int temperature = qBound(2000, tab.temperature, 9000);
+    const QColor color = tab.color.isValid() ? tab.color : QColor(Qt::white);
+    const int rgb = (color.red() << 16) | (color.green() << 8) | color.blue();
+
+    // Apply shortly after power-on so bulbs follow the tab/group profile instead of prior bulb state.
+    QTimer::singleShot(350, this, [this, mac, sku, brightness, temperature, rgb]() {
+        sendCommand(mac, sku, "devices.capabilities.range", "brightness", brightness);
+        sendCommand(mac, sku, "devices.capabilities.color_setting", "colorTemperatureK", temperature);
+        sendCommand(mac, sku, "devices.capabilities.color_setting", "colorRgb", rgb);
+
+        // Some bulbs drop the first color write immediately after power-on.
+        QTimer::singleShot(800, this, [this, mac, sku, rgb]() {
+            sendCommand(mac, sku, "devices.capabilities.color_setting", "colorRgb", rgb);
+        });
+    });
 }
 
 void MainWindow::refreshPowerButtons()

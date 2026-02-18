@@ -11,10 +11,13 @@
 #include <QListWidget>
 #include <QColor>
 #include <QSet>
+#include <QtGlobal>
 
 class QNetworkAccessManager;
 class QPushButton;
 class QLabel;
+class QAudioSource;
+class QIODevice;
 
 struct RoutineDeviceSetting {
     QString group; // "__all__" or room key from device name prefix
@@ -50,6 +53,7 @@ struct GroupTabSetting {
 struct RoutineVerifyTarget {
     QString mac;
     QString sku;
+    QString sourceTag = "[MANUAL]";
     bool expectPower = false;
     int power = 1;
     bool expectBrightness = false;
@@ -99,6 +103,8 @@ private:
     bool isDeviceOn(const QString &mac) const;
     void setDevicePowerState(const QString &mac, bool on);
     void refreshPowerButtons();
+    GroupTabSetting effectiveGroupTabSetting(const QString &groupKey) const;
+    void applyGroupTabSettingToDevice(const QString &mac, const QString &sku, const QString &groupKey);
 
     QWidget* createLightWidget(const QJsonObject &dev);
     QWidget* createGroupControl(const QVector<QJsonObject> &devices, const QString &title, const QString &groupKey);
@@ -112,18 +118,25 @@ private:
     void savePresenceSettings() const;
     bool isPresenceAutoOnEnabled(const QString &groupKey) const;
     bool isPresenceAutoOffEnabled(const QString &groupKey) const;
+    bool isAudioReactiveEnabled(const QString &groupKey) const;
+    bool hasAnyAudioReactiveEnabled() const;
+    void ensureAudioReactiveRunning();
+    void startAudioReactiveCapture();
+    void stopAudioReactiveCapture();
+    void processAudioReactiveTick();
     void loadRoutines();
     void saveRoutines() const;
     void refreshRoutineList();
     void refreshRoutineVerifyDiagnostics();
     QString lightLabelForMac(const QString &mac) const;
-    void addRoutineVerifyRecent(const QString &entry);
+    void addRoutineVerifyRecent(const QString &sourceTag, const QString &entry);
     bool openRoutineEditor(Routine &routine, const QString &title);
     void enqueueRoutineVerification(const QString &mac, const QString &sku,
                                     bool expectPower, int power,
                                     bool expectBrightness, int brightness,
                                     bool expectTemp, int temperature,
-                                    bool expectColor, const QColor &color);
+                                    bool expectColor, const QColor &color,
+                                    const QString &sourceTag = QString("[MANUAL]"));
     void processRoutineVerificationTick();
     void verifyRoutineTargetNow(const QString &mac);
 
@@ -137,8 +150,14 @@ private:
     QTimer *presenceTimer = nullptr;
     QTimer *routineTimer = nullptr;
     QTimer *routineVerifyTimer = nullptr;
+    QTimer *audioReactiveTimer = nullptr;
 
     QProcess *pingProcess = nullptr;
+    QProcess *pulseMonitorProcess = nullptr;
+    QAudioSource *audioSource = nullptr;
+    QIODevice *audioInputStream = nullptr;
+    bool usePulseMonitorProcess = false;
+    QString pulseMonitorSource;
     QString phoneHost = "192.168.42.2";
     bool phoneWasOnline = false;
     bool firstCheckDone = false;
@@ -157,9 +176,25 @@ private:
     QListWidget *routineVerifyList = nullptr;
     bool presenceAutoOnAllGroups = true;
     bool presenceAutoOffAllGroups = false;
+    bool audioReactiveAllGroups = false;
     QMap<QString, bool> presenceAutoOnGroupEnabled;
     QMap<QString, bool> presenceAutoOffGroupEnabled;
+    QMap<QString, bool> audioReactiveGroupEnabled;
     QMap<QString, GroupTabSetting> groupTabSettings;
+    QMap<QString, int> audioReactiveLastBrightness;
+    QMap<QString, qint64> audioReactiveLastCommandMs;
+    int audioReactiveIntervalMs = 100;
+    int audioReactivePerDeviceMinMs = 7000;
+    int audioReactiveGlobalMinMs = 500;
+    int audioReactiveMaxCommandsPerTick = 1;
+    int audioReactiveBrightnessDeadband = 2;
+    int audioReactiveDispatchOffset = 0;
+    double audioReactiveSmoothedLevel = 0.0;
+    double audioReactiveNoiseFloor = 0.01;
+    double audioReactivePeakLevel = 0.08;
+    qint64 audioReactiveLastDiagnosticsMs = 0;
+    qint64 audioReactiveLastHeartbeatMs = 0;
+    qint64 audioReactiveLastGlobalCommandMs = 0;
     QMap<QString, RoutineVerifyTarget> routineVerifyTargets;
     QSet<QString> routineVerifyInFlight;
     QStringList routineVerifyRecentEntries;
