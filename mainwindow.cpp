@@ -273,13 +273,13 @@ MainWindow::MainWindow(QWidget *parent)
     routineTimer->start(60000);     // unchanged
 
     if (!loadApiKey()) promptForApiKey();
+    loadPresenceSettings();
     if (apiKey.isEmpty()) {
-        QMessageBox::critical(this, "Error", "API key required");
+        showCriticalMessage("Error", "API key required");
         QApplication::quit();
         return;
     }
 
-    loadPresenceSettings();
     if (audioReactiveTimer)
         audioReactiveTimer->setInterval(audioReactiveIntervalMs);
     ensureAudioReactiveRunning();
@@ -338,7 +338,7 @@ void MainWindow::changeApiKey()
     if (ok) {
         key = key.trimmed();
         if (key.isEmpty()) {
-            QMessageBox::warning(this, "API Key", "API key cannot be empty.");
+            showWarningMessage("API Key", "API key cannot be empty.");
             return;
         }
         apiKey = key;
@@ -353,6 +353,7 @@ void MainWindow::loadPresenceSettings()
     presenceAutoOnAllGroups = true;
     presenceAutoOffAllGroups = false;
     audioReactiveAllGroups = false;
+    hideMessageBoxes = false;
     audioReactiveIntervalMs = 100;
     audioReactivePerDeviceMinMs = 7000;
     audioReactiveGlobalMinMs = 500;
@@ -400,6 +401,7 @@ void MainWindow::loadPresenceSettings()
                 presenceAutoOffAllGroups = offGroups.value("ALL").toBool(presenceAutoOffAllGroups);
 
             audioReactiveAllGroups = root.value("audioReactiveAllGroups").toBool(false);
+            hideMessageBoxes = root.value("hideMessageBoxes").toBool(false);
             const QJsonObject audioGroups = root.value("audioReactiveGroups").toObject();
             for (auto it = audioGroups.begin(); it != audioGroups.end(); ++it)
                 audioReactiveGroupEnabled[it.key()] = it.value().toBool(false);
@@ -489,6 +491,7 @@ void MainWindow::savePresenceSettings() const
     root["pingAutoOffGroups"] = offGroups;
     root["audioReactiveAllGroups"] = audioReactiveAllGroups;
     root["audioReactiveGroups"] = audioGroups;
+    root["hideMessageBoxes"] = hideMessageBoxes;
     root["audioReactiveIntervalMs"] = qBound(1, audioReactiveIntervalMs, 5000);
     root["audioReactivePerDeviceMinMs"] = qBound(100, audioReactivePerDeviceMinMs, 60000);
     root["audioReactiveGlobalMinMs"] = qBound(10, audioReactiveGlobalMinMs, 10000);
@@ -532,6 +535,34 @@ bool MainWindow::isAudioReactiveEnabled(const QString &groupKey) const
     if (audioReactiveGroupEnabled.contains(groupKey))
         return audioReactiveGroupEnabled.value(groupKey);
     return audioReactiveAllGroups;
+}
+
+void MainWindow::showWarningMessage(const QString &title, const QString &text) const
+{
+    if (hideMessageBoxes)
+        return;
+    QMessageBox::warning(const_cast<MainWindow *>(this), title, text);
+}
+
+void MainWindow::showCriticalMessage(const QString &title, const QString &text) const
+{
+    if (hideMessageBoxes)
+        return;
+    QMessageBox::critical(const_cast<MainWindow *>(this), title, text);
+}
+
+void MainWindow::showInformationMessage(const QString &title, const QString &text)
+{
+    if (hideMessageBoxes)
+        return;
+
+    QMessageBox *popup = new QMessageBox(QMessageBox::Information,
+                                         title,
+                                         text,
+                                         QMessageBox::Ok,
+                                         this);
+    popup->setAttribute(Qt::WA_DeleteOnClose);
+    popup->show();
 }
 
 bool MainWindow::hasAnyAudioReactiveEnabled() const
@@ -1795,7 +1826,7 @@ bool MainWindow::openRoutineEditor(Routine &routine, const QString &title)
             updated.days << dayOrder[i];
     }
     if (updated.days.isEmpty()) {
-        QMessageBox::warning(this, "Schedule", "Pick at least one day.");
+        showWarningMessage("Schedule", "Pick at least one day.");
         qDeleteAll(rows);
         return false;
     }
@@ -1823,7 +1854,7 @@ bool MainWindow::openRoutineEditor(Routine &routine, const QString &title)
     qDeleteAll(rows);
 
     if (updated.settings.isEmpty()) {
-        QMessageBox::warning(this, "Schedule", "Add at least one group action.");
+        showWarningMessage("Schedule", "Add at least one group action.");
         return false;
     }
 
@@ -2090,13 +2121,8 @@ void MainWindow::checkRoutines()
 
     if (routineExecuted) {
         if (!triggeredRoutineNames.isEmpty()) {
-            QMessageBox *popup = new QMessageBox(QMessageBox::Information,
-                                                 "Routine Triggered",
-                                                 QString("Triggered routine(s): %1").arg(triggeredRoutineNames.join(", ")),
-                                                 QMessageBox::Ok,
-                                                 this);
-            popup->setAttribute(Qt::WA_DeleteOnClose);
-            popup->show();
+            showInformationMessage("Routine Triggered",
+                                   QString("Triggered routine(s): %1").arg(triggeredRoutineNames.join(", ")));
         }
         refreshPowerButtons();
         // Pull fresh device state shortly after routine commands so UI text matches real hardware state.
@@ -2439,6 +2465,9 @@ QWidget* MainWindow::createConfigTab()
     audioDeadbandEdit->setRange(1, 25);
     audioDeadbandEdit->setValue(qBound(1, audioReactiveBrightnessDeadband, 25));
     form->addRow("Brightness Deadband:", audioDeadbandEdit);
+    QCheckBox *hideMessageBoxesCheck = new QCheckBox("Hide message boxes");
+    hideMessageBoxesCheck->setChecked(hideMessageBoxes);
+    form->addRow("Dialogs:", hideMessageBoxesCheck);
     l->addLayout(form);
 
     QLabel *rateHint = new QLabel("Recommended for Govee cloud API: Per-Device Min Gap >= 6000 ms (10 commands/minute limit per device).");
@@ -2447,10 +2476,10 @@ QWidget* MainWindow::createConfigTab()
 
     QPushButton *save = new QPushButton("Save Config");
     save->setMinimumHeight(40);
-    connect(save, &QPushButton::clicked, this, [this, hostEdit, audioIntervalEdit, audioPerDeviceMinEdit, audioGlobalMinEdit, audioMaxPerTickEdit, audioDeadbandEdit]() {
+    connect(save, &QPushButton::clicked, this, [this, hostEdit, audioIntervalEdit, audioPerDeviceMinEdit, audioGlobalMinEdit, audioMaxPerTickEdit, audioDeadbandEdit, hideMessageBoxesCheck]() {
         const QString newHost = hostEdit->text().trimmed();
         if (newHost.isEmpty()) {
-            QMessageBox::warning(this, "Config", "Ping host/IP cannot be empty.");
+            showWarningMessage("Config", "Ping host/IP cannot be empty.");
             return;
         }
         phoneHost = newHost;
@@ -2459,6 +2488,7 @@ QWidget* MainWindow::createConfigTab()
         audioReactiveGlobalMinMs = qBound(10, audioGlobalMinEdit->value(), 10000);
         audioReactiveMaxCommandsPerTick = qBound(1, audioMaxPerTickEdit->value(), 20);
         audioReactiveBrightnessDeadband = qBound(1, audioDeadbandEdit->value(), 25);
+        hideMessageBoxes = hideMessageBoxesCheck->isChecked();
         if (audioReactiveTimer)
             audioReactiveTimer->setInterval(audioReactiveIntervalMs);
         savePresenceSettings(); // Stored in Lights.json (main settings file).

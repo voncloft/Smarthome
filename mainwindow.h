@@ -119,6 +119,9 @@ private:
     bool isPresenceAutoOnEnabled(const QString &groupKey) const;
     bool isPresenceAutoOffEnabled(const QString &groupKey) const;
     bool isAudioReactiveEnabled(const QString &groupKey) const;
+    void showWarningMessage(const QString &title, const QString &text) const;
+    void showCriticalMessage(const QString &title, const QString &text) const;
+    void showInformationMessage(const QString &title, const QString &text);
     bool hasAnyAudioReactiveEnabled() const;
     void ensureAudioReactiveRunning();
     void startAudioReactiveCapture();
@@ -177,6 +180,7 @@ private:
     bool presenceAutoOnAllGroups = true;
     bool presenceAutoOffAllGroups = false;
     bool audioReactiveAllGroups = false;
+    bool hideMessageBoxes = false;
     QMap<QString, bool> presenceAutoOnGroupEnabled;
     QMap<QString, bool> presenceAutoOffGroupEnabled;
     QMap<QString, bool> audioReactiveGroupEnabled;
