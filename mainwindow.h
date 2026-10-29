@@ -18,6 +18,7 @@ class QPushButton;
 class QLabel;
 class QAudioSource;
 class QIODevice;
+class InfraredPanel;
 
 struct RoutineDeviceSetting {
     QString group; // "__all__" or room key from device name prefix
@@ -146,6 +147,7 @@ private:
 private:
     QNetworkAccessManager *nam = nullptr;
     QTabWidget *tabWidget = nullptr;
+    InfraredPanel *infraredPanel = nullptr;
 
     // NEW refresh button
     QPushButton *refreshBtn = nullptr;

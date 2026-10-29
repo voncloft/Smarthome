@@ -10,6 +10,10 @@ build/
 *.exe
 *.log
 *.qrc
+!resources.qrc
+!broadlink.qrc
+/build-broadlink/
+__pycache__/
 *.moc
 *.rcc
 *.pch

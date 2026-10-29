@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/broadlink">
+        <file alias="bridge.py">broadlink_bridge.py</file>
+        <file alias="acer-h6510bd.json">assets/acer-h6510bd.json</file>
+    </qresource>
+</RCC>

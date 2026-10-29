@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Lights
+GenericName=Smart home controller
+Comment=Control Govee lights and BroadLink infrared remotes
+Exec=Lights
+Icon=lights
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+StartupWMClass=Lights

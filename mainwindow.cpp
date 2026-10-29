@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "infraredpanel.h"
 #include <QApplication>
 #include <QToolBar>
 #include <QNetworkAccessManager>
@@ -206,7 +207,7 @@ static QString resolveConfigDirForWrite()
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
-    setWindowTitle("Govee Lights — Auto + Routines");
+    setWindowTitle("SmartHome — Lights & Infrared");
     resize(1450, 950);
 
     QMenu *fileMenu = menuBar()->addMenu("File");
@@ -2667,6 +2668,9 @@ void MainWindow::buildUI()
         addTabWithId(sa, room + " (" + QString::number(groups[room].size()) + ")", "__tab_room__:" + room);
     }
 
+    if (!infraredPanel)
+        infraredPanel = new InfraredPanel(resolveConfigDirForWrite() + "/infrared.json", this);
+    addTabWithId(infraredPanel, "Infrared", "__tab_infrared__");
     addTabWithId(createRoutinesTab(), "Routines", "__tab_routines__");
     addTabWithId(createDiagnosticsTab(), "Diagnostics", "__tab_diagnostics__");
     addTabWithId(createConfigTab(), "Config", "__tab_config__");
