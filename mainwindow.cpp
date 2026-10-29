@@ -15,6 +15,7 @@
 #include <QSlider>
 #include <QColorDialog>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -1582,18 +1583,24 @@ QWidget* MainWindow::createDiagnosticsTab()
     diagnosticsTab = w;
     QVBoxLayout *l = new QVBoxLayout(w);
 
-    l->addWidget(new QLabel("<h2>Routine Verification Diagnostics</h2>"));
+    l->addWidget(new QLabel("<h2>Diagnostics</h2>"));
 
     routineVerifySummaryLabel = new QLabel("No active routine verification checks.");
     routineVerifySummaryLabel->setWordWrap(true);
     l->addWidget(routineVerifySummaryLabel);
 
     routineVerifyList = new QListWidget;
+    routineVerifyList->setObjectName("routineVerifyList");
+    routineVerifyList->setAccessibleName("Lights and infrared diagnostics");
     routineVerifyList->setSelectionMode(QAbstractItemView::NoSelection);
     routineVerifyList->setFocusPolicy(Qt::NoFocus);
     routineVerifyList->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     l->addWidget(routineVerifyList, 1);
-    l->addWidget(infraredPanel->createDiagnosticsWidget(w), 1);
+    // IR shares the original light verification list and its bounded history.
+    for (const QString &entry : infraredPanel->diagnostics())
+        appendDiagnosticEntry(entry);
+    connect(infraredPanel, &InfraredPanel::diagnosticAdded,
+            this, &MainWindow::appendDiagnosticEntry);
     refreshRoutineVerifyDiagnostics();
     return w;
 }
@@ -1908,6 +1915,7 @@ void MainWindow::refreshRoutineVerifyDiagnostics()
                 .arg(routineVerifyTargets.size())
                 .arg(routineVerifyRecentEntries.size()));
 
+    const int previousScroll = routineVerifyList->verticalScrollBar()->value();
     routineVerifyList->clear();
 
     auto currentStateText = [](const RoutineVerifyTarget &t) -> QString {
@@ -1947,6 +1955,7 @@ void MainWindow::refreshRoutineVerifyDiagnostics()
         for (const QString &line : routineVerifyRecentEntries)
             routineVerifyList->addItem(line);
     }
+    routineVerifyList->verticalScrollBar()->setValue(previousScroll);
 }
 
 QString MainWindow::lightLabelForMac(const QString &mac) const
@@ -1970,7 +1979,12 @@ void MainWindow::addRoutineVerifyRecent(const QString &sourceTag, const QString 
                              .arg(QTime::currentTime().toString("HH:mm:ss"))
                              .arg(tag)
                              .arg(entry);
-    routineVerifyRecentEntries.prepend(line);
+    appendDiagnosticEntry(line);
+}
+
+void MainWindow::appendDiagnosticEntry(const QString &entry)
+{
+    routineVerifyRecentEntries.prepend(entry);
     while (routineVerifyRecentEntries.size() > 500)
         routineVerifyRecentEntries.removeLast();
     refreshRoutineVerifyDiagnostics();

@@ -78,6 +78,7 @@ struct RoutineVerifyTarget {
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
+    friend class DiagnosticsTest;
 
 public:
     explicit MainWindow(QWidget *parent = nullptr);
@@ -132,6 +133,7 @@ private:
     void saveRoutines() const;
     void refreshRoutineList();
     void refreshRoutineVerifyDiagnostics();
+    void appendDiagnosticEntry(const QString &entry);
     QString lightLabelForMac(const QString &mac) const;
     void addRoutineVerifyRecent(const QString &sourceTag, const QString &entry);
     bool openRoutineEditor(Routine &routine, const QString &title);

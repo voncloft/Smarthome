@@ -12,8 +12,6 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
-#include <QPlainTextEdit>
-#include <QScrollBar>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
@@ -190,43 +188,6 @@ void InfraredPanel::logDiagnostic(const QString &text)
     diagnosticHistory.append(entry);
     while (diagnosticHistory.size() > 500) diagnosticHistory.removeFirst();
     emit diagnosticAdded(entry);
-}
-
-QWidget *InfraredPanel::createDiagnosticsWidget(QWidget *parent)
-{
-    auto *widget = new QWidget(parent);
-    auto *layout = new QVBoxLayout(widget);
-    layout->setContentsMargins(0, 0, 0, 0);
-    auto *heading = new QHBoxLayout;
-    heading->addWidget(new QLabel("<h2>Infrared Activity</h2>"));
-    heading->addStretch();
-    auto *clear = new QPushButton("Clear log");
-    clear->setObjectName("clearInfraredDiagnostics");
-    heading->addWidget(clear);
-    layout->addLayout(heading);
-    auto *log = new QPlainTextEdit;
-    log->setObjectName("infraredDiagnostics");
-    log->setAccessibleName("Infrared activity log");
-    log->setReadOnly(true);
-    log->setMaximumBlockCount(500);
-    log->setMinimumHeight(160);
-    log->setPlaceholderText("Infrared commands, status updates, and errors appear here. Latest 500 messages, this session.");
-    log->setPlainText(diagnosticHistory.join('\n'));
-    log->verticalScrollBar()->setValue(log->verticalScrollBar()->maximum());
-    layout->addWidget(log);
-    connect(this, &InfraredPanel::diagnosticAdded, log, [log](const QString &entry) {
-        auto *scroll = log->verticalScrollBar();
-        const int previous = scroll->value();
-        const bool follow = previous >= scroll->maximum();
-        log->appendPlainText(entry);
-        scroll->setValue(follow ? scroll->maximum() : previous);
-    });
-    connect(this, &InfraredPanel::diagnosticsCleared, log, &QPlainTextEdit::clear);
-    connect(clear, &QPushButton::clicked, this, [this] {
-        diagnosticHistory.clear();
-        emit diagnosticsCleared();
-    });
-    return widget;
 }
 
 void InfraredPanel::load()

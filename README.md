@@ -30,6 +30,13 @@ Tests use simulated hubs and temporary settings, without contacting lights or in
 
 ## Changes
 
+### 0.1.3 — 2026-10-29
+
+- Show infrared commands, status, and errors in the original Diagnostics list,
+  mixed with light events in the same recent-results history (newest first).
+- Remove the separate infrared log box; retain the latest 500 combined events
+  and preserve the list when tabs or light verification refresh.
+
 ### 0.1.2 — 2026-10-29
 
 - Added a scrolling infrared activity log under Diagnostics, alongside light verification.

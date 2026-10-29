@@ -20,11 +20,10 @@ public:
     explicit InfraredPanel(const QString &settingsFile, QWidget *parent = nullptr,
                            const QString &helperOverride = QString());
     ~InfraredPanel() override;
-    QWidget *createDiagnosticsWidget(QWidget *parent = nullptr);
+    QStringList diagnostics() const { return diagnosticHistory; }
 
 signals:
     void diagnosticAdded(const QString &entry);
-    void diagnosticsCleared();
 
 private:
     void load();
