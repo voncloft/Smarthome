@@ -5,7 +5,10 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QPlainTextEdit>
+#include <QScrollBar>
 #include <QTemporaryDir>
+#include <memory>
 
 class InfraredPanelTest : public QObject
 {
@@ -143,6 +146,109 @@ print(json.dumps(json.loads(pathlib.Path(__file__ + '.reply').read_text())), flu
         QTRY_VERIFY_WITH_TIMEOUT(button(panel, "learnInfrared")->isEnabled(), 5000);
         QCOMPARE(read(file), settings);
         QCOMPARE(panel.findChild<QLabel *>("infraredStatus")->text(), QString("Timed out"));
+    }
+    void diagnosticsShowCommandTargetAndResult() {
+        InfraredPanel panel(file, nullptr, helper);
+        std::unique_ptr<QWidget> view(panel.createDiagnosticsWidget());
+        auto *log = view->findChild<QPlainTextEdit *>("infraredDiagnostics");
+        QVERIFY(log); QVERIFY(log->isReadOnly());
+        combo(panel, "infraredHub")->setCurrentIndex(1);
+        button(panel, "testInfraredMenu")->click();
+        QVERIFY(log->toPlainText().contains("Sending infrared command"));
+        QVERIFY(log->toPlainText().contains("send / Projector room / 192.168.1.21 / Projector / Menu"));
+        QTRY_VERIFY_WITH_TIMEOUT(log->toPlainText().contains("Sent Menu to Projector"), 5000);
+        QVERIFY(log->toPlainText().contains("Check the device for its response"));
+        QVERIFY(QRegularExpression("^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2} \\[IR\\]").match(log->toPlainText()).hasMatch());
+        QVERIFY(!log->toPlainText().contains(menuCode));
+        QVERIFY(!log->toPlainText().contains(powerCode));
+    }
+    void diagnosticsCaptureProgressAndErrors() {
+        write(helper, R"PY(import json, sys
+json.load(sys.stdin)
+print(json.dumps({'event': 'progress', 'message': 'Waiting for remote button'}), flush=True)
+print('socket receive failed', file=sys.stderr, flush=True)
+print(json.dumps({'event': 'result', 'ok': False, 'message': 'Hub authentication failed'}), flush=True)
+)PY");
+        InfraredPanel panel(file, nullptr, helper);
+        std::unique_ptr<QWidget> view(panel.createDiagnosticsWidget());
+        auto *log = view->findChild<QPlainTextEdit *>("infraredDiagnostics");
+        button(panel, "learnInfrared")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(button(panel, "learnInfrared")->isEnabled(), 5000);
+        const auto text = log->toPlainText();
+        QVERIFY(text.contains("learn / Bedroom / 192.168.1.20 / TV / Menu"));
+        QVERIFY(text.contains("Waiting for remote button"));
+        QVERIFY(text.contains("Helper: socket receive failed"));
+        QVERIFY(text.contains("Hub authentication failed"));
+        QCOMPARE(read(file), settings);
+    }
+    void diagnosticsRetainStartupErrors() {
+        write(file, "{broken");
+        InfraredPanel panel(file, nullptr, helper);
+        std::unique_ptr<QWidget> view(panel.createDiagnosticsWidget());
+        auto *log = view->findChild<QPlainTextEdit *>("infraredDiagnostics");
+        QVERIFY(log->toPlainText().contains("Could not read saved infrared settings"));
+    }
+    void diagnosticsBoundHistoryScrollAndClear() {
+        write(helper, R"PY(import json, sys
+json.load(sys.stdin)
+for i in range(550):
+    print(json.dumps({'event': 'progress', 'message': 'progress-' + str(i)}))
+print(json.dumps({'event': 'result', 'ok': True, 'message': 'Support ready'}), flush=True)
+)PY");
+        InfraredPanel panel(file, nullptr, helper);
+        std::unique_ptr<QWidget> view(panel.createDiagnosticsWidget());
+        auto *log = view->findChild<QPlainTextEdit *>("infraredDiagnostics");
+        view->resize(850, 300); view->show();
+        button(panel, "checkInfraredSupport")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(button(panel, "checkInfraredSupport")->isEnabled(), 5000);
+        QCOMPARE(log->document()->blockCount(), 500);
+        QVERIFY(!log->toPlainText().contains("progress-0\n"));
+        QVERIFY(log->toPlainText().contains("progress-549"));
+        QTRY_VERIFY(log->verticalScrollBar()->maximum() > 0);
+        QCOMPARE(log->verticalScrollBar()->value(), log->verticalScrollBar()->maximum());
+        std::unique_ptr<QWidget> restored(panel.createDiagnosticsWidget());
+        QCOMPARE(restored->findChild<QPlainTextEdit *>("infraredDiagnostics")->toPlainText(), log->toPlainText());
+        write(helper, "import json, sys\njson.load(sys.stdin)\nprint(json.dumps({'event':'result','ok':True,'message':'Support ready'}))\n");
+        log->verticalScrollBar()->setValue(0);
+        button(panel, "checkInfraredSupport")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(button(panel, "checkInfraredSupport")->isEnabled(), 5000);
+        QCOMPARE(log->verticalScrollBar()->value(), 0);
+        view->findChild<QPushButton *>("clearInfraredDiagnostics")->click();
+        QVERIFY(log->toPlainText().isEmpty());
+        QVERIFY(restored->findChild<QPlainTextEdit *>("infraredDiagnostics")->toPlainText().isEmpty());
+        std::unique_ptr<QWidget> cleared(panel.createDiagnosticsWidget());
+        QVERIFY(cleared->findChild<QPlainTextEdit *>("infraredDiagnostics")->toPlainText().isEmpty());
+    }
+    void diagnosticsLogCancelAndResetTarget() {
+        write(helper, R"PY(import json, pathlib, sys, time
+request = json.load(sys.stdin)
+pathlib.Path(__file__ + '.request').write_text(json.dumps(request))
+time.sleep(30)
+)PY");
+        InfraredPanel panel(file, nullptr, helper);
+        std::unique_ptr<QWidget> view(panel.createDiagnosticsWidget());
+        auto *log = view->findChild<QPlainTextEdit *>("infraredDiagnostics");
+        button(panel, "learnInfrared")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(helper + ".request"), 5000);
+        button(panel, "cancelInfrared")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(button(panel, "learnInfrared")->isEnabled(), 5000);
+        QVERIFY(log->toPlainText().contains("Canceled. Any previously saved button was kept."));
+        write(helper, "import json, sys\njson.load(sys.stdin)\nprint(json.dumps({'event':'result','ok':True,'message':'Support ready'}))\n");
+        button(panel, "checkInfraredSupport")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(button(panel, "checkInfraredSupport")->isEnabled(), 5000);
+        const auto last = log->toPlainText().section('\n', -1);
+        QVERIFY(last.contains("[IR] check — Support ready"));
+        QVERIFY(!last.contains("Bedroom"));
+    }
+    void diagnosticsScreenshot() {
+        if (qEnvironmentVariableIsEmpty("LIGHTS_DIAGNOSTICS_SCREENSHOT")) QSKIP("No preview requested");
+        InfraredPanel panel(file, nullptr, helper);
+        std::unique_ptr<QWidget> view(panel.createDiagnosticsWidget());
+        combo(panel, "infraredHub")->setCurrentIndex(1);
+        button(panel, "testInfraredMenu")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(button(panel, "testInfraredMenu")->isEnabled(), 5000);
+        view->resize(1000, 360); view->show(); QTest::qWait(100);
+        QVERIFY(view->grab().save(qEnvironmentVariable("LIGHTS_DIAGNOSTICS_SCREENSHOT")));
     }
     void screenshot() {
         if (qEnvironmentVariableIsEmpty("LIGHTS_TEST_SCREENSHOT")) QSKIP("No preview requested");

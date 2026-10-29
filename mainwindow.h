@@ -148,6 +148,7 @@ private:
     QNetworkAccessManager *nam = nullptr;
     QTabWidget *tabWidget = nullptr;
     InfraredPanel *infraredPanel = nullptr;
+    QWidget *diagnosticsTab = nullptr;
 
     // NEW refresh button
     QPushButton *refreshBtn = nullptr;

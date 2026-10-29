@@ -1,5 +1,6 @@
 #include "infraredpanel.h"
 #include <QComboBox>
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -11,6 +12,8 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QPlainTextEdit>
+#include <QScrollBar>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
@@ -45,6 +48,7 @@ InfraredPanel::InfraredPanel(const QString &file, QWidget *parent, const QString
     auto *rename = new QPushButton("Name room");
     auto *remove = new QPushButton("Remove hub");
     auto *check = new QPushButton("Check support");
+    check->setObjectName("checkInfraredSupport");
     for (auto *button : {discover, addIp, rename, remove, check}) hubActions->addWidget(button);
     hubLayout->addLayout(hubActions);
     layout->addWidget(hubGroup);
@@ -80,6 +84,7 @@ InfraredPanel::InfraredPanel(const QString &file, QWidget *parent, const QString
     menuButton->setObjectName("testInfraredMenu");
     forgetButton = new QPushButton("Forget button");
     cancelButton = new QPushButton("Cancel");
+    cancelButton->setObjectName("cancelInfrared");
     for (auto *button : {learnButton, sendButton, menuButton, forgetButton, cancelButton}) commandActions->addWidget(button);
     remoteLayout->addLayout(commandActions);
     auto *help = new QLabel("Choose a button, click Learn, then point the original remote at the Mini. "
@@ -106,6 +111,7 @@ InfraredPanel::InfraredPanel(const QString &file, QWidget *parent, const QString
         }
     }
     deadline.setSingleShot(true);
+    deadline.setObjectName("infraredDeadline");
     connect(&deadline, &QTimer::timeout, this, [this] {
         canceled = true;
         status("Hub operation timed out. Check its address and network connection; a sent command may already have reached it.");
@@ -116,13 +122,17 @@ InfraredPanel::InfraredPanel(const QString &file, QWidget *parent, const QString
         process.closeWriteChannel();
     });
     connect(&process, &QProcess::readyReadStandardOutput, this, &InfraredPanel::consumeOutput);
-    connect(&process, &QProcess::readyReadStandardError, this, [this] { process.readAllStandardError(); });
+    connect(&process, &QProcess::readyReadStandardError, this, [this] {
+        const auto message = QString::fromUtf8(process.readAllStandardError()).trimmed();
+        if (!message.isEmpty() && !canceled) logDiagnostic("Helper: " + message.left(4000));
+    });
     connect(&process, &QProcess::finished, this, &InfraredPanel::finish);
     connect(&process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (error != QProcess::FailedToStart) return;
         deadline.stop();
         busy = false;
         status("Could not start Python 3. Install the python and python-broadlink packages.");
+        operationContext.clear();
         refreshButtons();
     });
     connect(discover, &QPushButton::clicked, this, [this] { start({{"action", "discover"}}); });
@@ -165,7 +175,59 @@ InfraredPanel::~InfraredPanel()
     }
 }
 
-void InfraredPanel::status(const QString &text) { statusLabel->setText(text); }
+void InfraredPanel::status(const QString &text)
+{
+    statusLabel->setText(text);
+    logDiagnostic(text);
+}
+
+void InfraredPanel::logDiagnostic(const QString &text)
+{
+    QString message = (operationContext.isEmpty() ? text : operationContext + " — " + text);
+    message = message.left(4096).replace('\n', ' ').replace('\r', ' ');
+    const QString entry = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
+                          + " [IR] " + message;
+    diagnosticHistory.append(entry);
+    while (diagnosticHistory.size() > 500) diagnosticHistory.removeFirst();
+    emit diagnosticAdded(entry);
+}
+
+QWidget *InfraredPanel::createDiagnosticsWidget(QWidget *parent)
+{
+    auto *widget = new QWidget(parent);
+    auto *layout = new QVBoxLayout(widget);
+    layout->setContentsMargins(0, 0, 0, 0);
+    auto *heading = new QHBoxLayout;
+    heading->addWidget(new QLabel("<h2>Infrared Activity</h2>"));
+    heading->addStretch();
+    auto *clear = new QPushButton("Clear log");
+    clear->setObjectName("clearInfraredDiagnostics");
+    heading->addWidget(clear);
+    layout->addLayout(heading);
+    auto *log = new QPlainTextEdit;
+    log->setObjectName("infraredDiagnostics");
+    log->setAccessibleName("Infrared activity log");
+    log->setReadOnly(true);
+    log->setMaximumBlockCount(500);
+    log->setMinimumHeight(160);
+    log->setPlaceholderText("Infrared commands, status updates, and errors appear here. Latest 500 messages, this session.");
+    log->setPlainText(diagnosticHistory.join('\n'));
+    log->verticalScrollBar()->setValue(log->verticalScrollBar()->maximum());
+    layout->addWidget(log);
+    connect(this, &InfraredPanel::diagnosticAdded, log, [log](const QString &entry) {
+        auto *scroll = log->verticalScrollBar();
+        const int previous = scroll->value();
+        const bool follow = previous >= scroll->maximum();
+        log->appendPlainText(entry);
+        scroll->setValue(follow ? scroll->maximum() : previous);
+    });
+    connect(this, &InfraredPanel::diagnosticsCleared, log, &QPlainTextEdit::clear);
+    connect(clear, &QPushButton::clicked, this, [this] {
+        diagnosticHistory.clear();
+        emit diagnosticsCleared();
+    });
+    return widget;
+}
 
 void InfraredPanel::load()
 {
@@ -310,12 +372,23 @@ void InfraredPanel::start(QJsonObject request)
     if (busy || readOnly) return;
     if (helper.isEmpty()) { status("The infrared helper is missing. Rebuild or reinstall SmartHome."); return; }
     pending = request;
+    const QString action = request.value("action").toString();
+    QStringList context{action};
+    for (const auto &key : {"name", "host", "remoteName", "command"}) {
+        const auto value = request.value(key).toString();
+        if (!value.isEmpty()) context.append(value);
+    }
+    operationContext = context.join(" / ");
     output.clear();
     result = {};
     gotResult = canceled = false;
     busy = true;
     refreshButtons();
-    status(request.value("action") == "learn" ? "Preparing the Mini to learn…" : "Contacting BroadLink support…");
+    if (action == "learn") status("Preparing the Mini to learn…");
+    else if (action == "send") status("Sending infrared command…");
+    else if (action == "discover") status("Discovering infrared hubs on the local network…");
+    else if (action == "identify") status("Identifying infrared hub…");
+    else status("Checking Python and BroadLink support…");
     deadline.start(request.value("action") == "learn" ? 50000 : 18000);
     process.start("python3", {"-I", helper});
 }
@@ -342,7 +415,7 @@ void InfraredPanel::finish(int exitCode, QProcess::ExitStatus exitStatus)
     consumeOutput();
     deadline.stop();
     busy = false;
-    if (canceled) { refreshButtons(); return; }
+    if (canceled) { operationContext.clear(); refreshButtons(); return; }
     if (!gotResult || !result.value("ok").toBool() || exitCode != 0 || exitStatus != QProcess::NormalExit) {
         status(result.value("message").toString("Infrared helper stopped without a result. Check Python and python-broadlink."));
     } else {
@@ -368,6 +441,7 @@ void InfraredPanel::finish(int exitCode, QProcess::ExitStatus exitStatus)
                    + " through " + pending.value("hubName").toString() + ". Check the device for its response.");
         } else status(result.value("message").toString());
     }
+    operationContext.clear();
     refreshCommands();
 }
 
@@ -376,6 +450,10 @@ void InfraredPanel::mergeHubs(const QJsonArray &found)
     if (found.isEmpty()) { status("No infrared hubs found. Check Wi-Fi and ‘Lock device’, or add the hub by IP address."); return; }
     for (const auto &value : found) {
         auto incoming = value.toObject();
+        logDiagnostic(QString("Discovered %1 (%2), %3; local access %4.")
+                          .arg(incoming.value("name").toString(), incoming.value("host").toString(),
+                               incoming.value("model").toString(),
+                               incoming.value("locked").toBool() ? "locked" : "unlocked"));
         bool exists = false;
         for (int i = 0; i < hubs.size(); ++i) {
             const auto old = hubs[i].toObject();
@@ -399,6 +477,7 @@ void InfraredPanel::learn()
     if (hub.isEmpty() || remote.isEmpty() || command.isEmpty()) return;
     hub["action"] = "learn";
     hub["remoteId"] = remote.value("id");
+    hub["remoteName"] = remote.value("name");
     hub["command"] = command;
     start(hub);
 }

@@ -1577,7 +1577,9 @@ QWidget* MainWindow::createRoutinesTab()
 
 QWidget* MainWindow::createDiagnosticsTab()
 {
+    if (diagnosticsTab) return diagnosticsTab;
     QWidget *w = new QWidget;
+    diagnosticsTab = w;
     QVBoxLayout *l = new QVBoxLayout(w);
 
     l->addWidget(new QLabel("<h2>Routine Verification Diagnostics</h2>"));
@@ -1590,7 +1592,8 @@ QWidget* MainWindow::createDiagnosticsTab()
     routineVerifyList->setSelectionMode(QAbstractItemView::NoSelection);
     routineVerifyList->setFocusPolicy(Qt::NoFocus);
     routineVerifyList->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    l->addWidget(routineVerifyList);
+    l->addWidget(routineVerifyList, 1);
+    l->addWidget(infraredPanel->createDiagnosticsWidget(w), 1);
     refreshRoutineVerifyDiagnostics();
     return w;
 }

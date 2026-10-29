@@ -30,6 +30,13 @@ Tests use simulated hubs and temporary settings, without contacting lights or in
 
 ## Changes
 
+### 0.1.2 — 2026-10-29
+
+- Added a scrolling infrared activity log under Diagnostics, alongside light verification.
+- Log sends, learning, discovery, support checks, progress, errors, cancellation, and timeouts with timestamps and target details.
+- Keep the latest 500 messages for the current session, with Clear log and automatic scrolling that pauses while reading older entries.
+- Preserve the log across tab refreshes. A sent command does not confirm appliance state.
+
 ### 0.1.1 — 2026-10-29
 
 - Added local BroadLink Mini discovery, room naming, remote-button learning, and sending.

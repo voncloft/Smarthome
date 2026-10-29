@@ -7,6 +7,7 @@
 #include <QProcess>
 #include <QTemporaryFile>
 #include <QTimer>
+#include <QStringList>
 
 class QComboBox;
 class QLabel;
@@ -19,6 +20,11 @@ public:
     explicit InfraredPanel(const QString &settingsFile, QWidget *parent = nullptr,
                            const QString &helperOverride = QString());
     ~InfraredPanel() override;
+    QWidget *createDiagnosticsWidget(QWidget *parent = nullptr);
+
+signals:
+    void diagnosticAdded(const QString &entry);
+    void diagnosticsCleared();
 
 private:
     void load();
@@ -44,6 +50,10 @@ private:
     QJsonObject selectedHub() const;
     QJsonObject selectedRemote() const;
     void status(const QString &text);
+    void logDiagnostic(const QString &text);
+
+    QStringList diagnosticHistory;
+    QString operationContext;
 
     QString settingsFile;
     QString helper;
